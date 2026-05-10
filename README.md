@@ -44,28 +44,42 @@ main.py (Orchestrator)
 2. Нажмите "New Project" → "Deploy from GitHub repo"
 3. Выберите `andyrbek2709-tech/instagram-monitor-bot`
 
-### 2. Настройте переменные окружения
+### 2. Настройте переменные окружения в Railway
 
-Добавьте все переменные в Railway (Environment):
+**Обязательные переменные:**
+
+| Переменная | Значение | Пример |
+|-----------|---------|--------|
+| `TELEGRAM_BOT_TOKEN` | Токен от BotFather | `123456:ABC-DEF1234...` |
+| `TELEGRAM_CHAT_ID` | Ваш ID в Telegram (не юзернейм!) | `12345678` |
+| `OPENAI_API_KEY` | API ключ от OpenAI | `sk-proj-xxx...` |
+| `CLAUDE_API_KEY` | API ключ от Anthropic | `sk-ant-v4-xxx...` |
+| `INSTAGRAM_USERNAME` | Instagram юзернейм | `my_instagram_account` |
+| `INSTAGRAM_PASSWORD` | Instagram пароль | `MySecurePassword123!` |
+
+**Где получить значения:**
+
+- **TELEGRAM_BOT_TOKEN**: 
+  1. Напишите @BotFather в Telegram
+  2. `/start` → `/newbot`
+  3. Введите имя и юзернейм бота
+  4. BotFather отправит токен
+
+- **TELEGRAM_CHAT_ID**:
+  1. Добавьте бота в группу или напишите ему
+  2. Выполните: `curl https://api.telegram.org/bot{TOKEN}/getUpdates`
+  3. Найдите `"chat":{"id":12345678}` — это ваш ID
+
+- **OPENAI_API_KEY**: https://platform.openai.com/api-keys
+
+- **CLAUDE_API_KEY**: https://console.anthropic.com/account/keys
+
+**Опциональные переменные:**
 
 ```env
-# Telegram
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-
-# APIs
-OPENAI_API_KEY=sk-your-openai-key
-CLAUDE_API_KEY=sk-ant-your-claude-key
-
-# Instagram
-INSTAGRAM_USERNAME=your_instagram_username
-INSTAGRAM_PASSWORD=your_instagram_password
-
-# Конфигурация
-DATABASE_PATH=/data/instagram_monitor.db
+DATABASE_PATH=/app/data/instagram_monitor.db
 LOG_LEVEL=INFO
 TIMEZONE=Europe/Moscow
-
-# Anti-detection
 MIN_REQUEST_DELAY=8
 MAX_REQUEST_DELAY=20
 MIN_ACCOUNT_DELAY=30
