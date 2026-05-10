@@ -174,7 +174,7 @@ class InstagramMonitorBotPipeline:
             await self.telegram_bot.application.run_polling()
 
         except Exception as e:
-            logger.error(f"Bot startup error: {e}")
+            logger.error(f"Bot startup error: {e}", exc_info=True)
 
     def run_manual_cycle(self) -> None:
         """Запустить один цикл вручную (для тестирования)"""
@@ -201,8 +201,16 @@ async def main():
         logger.error("Component initialization failed")
         return
 
-    # Запустить бота
-    await pipeline.start()
+    # Настроить Telegram бота
+    pipeline.telegram_bot.setup()
+
+    # Запустить планировщик
+    pipeline.scheduler_manager = SchedulerManager(pipeline.telegram_bot, pipeline.db_path)
+    pipeline.scheduler_manager.start_scheduler()
+
+    # Запустить бота с polling
+    logger.info("Starting Telegram bot polling")
+    await pipeline.telegram_bot.application.run_polling()
 
 
 if __name__ == '__main__':
@@ -211,4 +219,4 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"Fatal error: {e}", exc_info=True)
