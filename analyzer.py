@@ -22,7 +22,7 @@ BRAND_LIST = [
 # Категории контента
 CONTENT_CATEGORIES = {
     'lifestyle': ['lifestyle', 'life', 'daily', 'everyday', 'mood', 'moment', 'vibe'],
-    'technology': ['tech', 'tech', 'digital', 'gadget', 'innovation', 'software'],
+    'technology': ['tech', 'digital', 'gadget', 'innovation', 'software'],
     'beauty': ['beauty', 'makeup', 'skincare', 'cosmetics', 'face', 'hair'],
     'fitness': ['fitness', 'gym', 'workout', 'exercise', 'sport', 'health'],
     'food': ['food', 'eat', 'recipe', 'cook', 'restaurant', 'delicious'],
@@ -128,7 +128,7 @@ class ImageAnalyzer:
             1: 'single_image',
             2: 'video_content',
             8: 'multiple_images',
-            2: 'short_video'
+            22: 'short_video'
         }
         return type_map.get(media_type, 'ephemeral_content')
 

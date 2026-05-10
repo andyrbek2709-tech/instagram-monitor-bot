@@ -6,6 +6,18 @@ from datetime import datetime
 from typing import List, Dict
 from dotenv import load_dotenv
 
+# Загрузить переменные окружения
+load_dotenv()
+
+# Создать необходимые директории перед настройкой логирования
+def _ensure_directories() -> None:
+    """Создать необходимые директории"""
+    directories = ['logs', 'data', 'data/media', 'data/sessions', 'database']
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+
+_ensure_directories()
+
 # Импорты модулей проекта
 from parser import Parser
 from filter import Filter
@@ -26,9 +38,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-
-# Загрузить переменные окружения
-load_dotenv()
 
 
 class InstagramMonitorBotPipeline:
