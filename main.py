@@ -1,5 +1,4 @@
 import os
-import asyncio
 import logging
 import sqlite3
 from datetime import datetime
@@ -182,7 +181,7 @@ class InstagramMonitorBotPipeline:
         self.run_pipeline_cycle()
 
 
-async def main():
+def main():
     """Главная функция"""
 
     # Создать пайплайн
@@ -208,14 +207,14 @@ async def main():
     pipeline.scheduler_manager = SchedulerManager(pipeline.telegram_bot, pipeline.db_path)
     pipeline.scheduler_manager.start_scheduler()
 
-    # Запустить бота с polling
+    # Запустить бота с polling (это блокирующий вызов, управляет собственным event loop)
     logger.info("Starting Telegram bot polling")
-    await pipeline.telegram_bot.application.run_polling()
+    pipeline.telegram_bot.application.run_polling()
 
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
