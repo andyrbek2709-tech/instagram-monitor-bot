@@ -224,6 +224,16 @@ class TelegramBot:
         query = update.callback_query
         await query.answer()
 
+        settings_text = """⚙️ *НАСТРОЙКИ БОТА*
+
+Текущие параметры:
+• Время дайджеста: 09:00 (МСК)
+• Минимальная релевантность: 0.5
+• Интервал проверки: каждый час
+• Часовой пояс: Europe/Moscow
+
+Что хотите изменить?"""
+
         keyboard = [
             [InlineKeyboardButton("🔔 Время дайджеста", callback_data='digest_time')],
             [InlineKeyboardButton("📏 Минимальная релевантность", callback_data='min_relevance')],
@@ -231,7 +241,70 @@ class TelegramBot:
         ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("⚙️ Настройки бота", reply_markup=reply_markup)
+        await query.edit_message_text(settings_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+    async def settings_digest_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Настройка времени дайджеста"""
+        query = update.callback_query
+        await query.answer()
+
+        keyboard = [
+            [InlineKeyboardButton("08:00", callback_data='set_digest_08'),
+             InlineKeyboardButton("09:00", callback_data='set_digest_09'),
+             InlineKeyboardButton("10:00", callback_data='set_digest_10')],
+            [InlineKeyboardButton("🔙 Назад", callback_data='settings')]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "🔔 *Время отправки ежедневного дайджеста:*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+    async def settings_min_relevance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Настройка минимальной релевантности"""
+        query = update.callback_query
+        await query.answer()
+
+        keyboard = [
+            [InlineKeyboardButton("0.3 (низкий)", callback_data='set_rel_03'),
+             InlineKeyboardButton("0.5 (средний)", callback_data='set_rel_05')],
+            [InlineKeyboardButton("0.7 (высокий)", callback_data='set_rel_07'),
+             InlineKeyboardButton("0.9 (очень высокий)", callback_data='set_rel_09')],
+            [InlineKeyboardButton("🔙 Назад", callback_data='settings')]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "📏 *Минимальный порог релевантности для дайджеста:*\n\n"
+            "Выше порог = только наиболее релевантные посты",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+    async def back_to_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Вернуться в главное меню"""
+        query = update.callback_query
+        await query.answer()
+
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
+            [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
+            [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
+            [InlineKeyboardButton("📈 Статистика", callback_data='stats')],
+            [InlineKeyboardButton("⏸️ Пауза / ▶️ Возобновить", callback_data='pause')],
+            [InlineKeyboardButton("⚙️ Настройки", callback_data='settings')],
+            [InlineKeyboardButton("❓ Справка", callback_data='help')]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "👋 *Добро пожаловать в Instagram Monitor Bot!*\n\n"
+            "Я помогу вам отслеживать и анализировать посты Instagram.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
 
     async def get_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Получить статистику"""
@@ -328,34 +401,81 @@ class TelegramBot:
             await query.edit_message_text("❌ Ошибка при возобновлении")
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Справка"""
-        query = update.callback_query
-        await query.answer()
-
+        """Справка - работает как прямая команда и как кнопка"""
         help_text = """
-📚 *Справка Instagram Monitor Bot*
+📚 *СПРАВКА Instagram Monitor Bot*
 
-*Основные команды:*
+*━━━━━━━━━━━━━━━━━*
+*🔧 ОСНОВНЫЕ КОМАНДЫ:*
+━━━━━━━━━━━━━━━━━
+
 /start - главное меню
 /help - эта справка
 
-*Функции:*
-✅ Мониторинг постов Instagram
-✅ Анализ контента через AI
-✅ Определение вирусного потенциала
-✅ Ежедневные дайджесты
-✅ Статистика по постам
-✅ Пауза/Возобновление мониторинга
+*━━━━━━━━━━━━━━━━━*
+*📱 ФУНКЦИИ И КНОПКИ:*
+━━━━━━━━━━━━━━━━━
 
-*Как начать:*
-1. Нажмите "Добавить аккаунт"
-2. Введите имя пользователя
-3. Получайте ежедневные анализы
+*➕ Добавить аккаунт*
+Формат: введите имя пользователя Instagram
+Примеры: @instagram или instagram (без @)
+Сохраняется для ежедневного мониторинга
 
-Вопросы? Свяжитесь с поддержкой.
+*📋 Мои аккаунты*
+Показывает список всех отслеживаемых аккаунтов
+Дата добавления и статус активности
+
+*📊 Получить дайджест*
+Ежедневный анализ постов за последние 24 часа
+- Количество постов
+- Средняя релевантность
+- Определение вирусного контента
+- Анализ настроения (sentiment)
+
+*📈 Статистика*
+Общая статистика по всем постам:
+- Всего проанализировано постов
+- Средний engagement rate
+- Распределение по типам контента
+- Тренды и рекомендации
+
+*⚙️ Настройки*
+Конфигурация бота:
+- Интервал проверки (мин)
+- Часовой пояс
+- Время отправки дайджеста
+- Порог релевантности
+
+*⏸️ Пауза / ▶️ Возобновить*
+Управление мониторингом
+- Пауза: остановит все проверки
+- Возобновить: продолжит мониторинг
+
+*━━━━━━━━━━━━━━━━━*
+*❓ КАК НАЧАТЬ:*
+━━━━━━━━━━━━━━━━━
+
+1️⃣ Нажмите "Добавить аккаунт"
+2️⃣ Введите имя пользователя (например: instagram)
+3️⃣ Подождите подтверждения
+4️⃣ Получайте ежедневный дайджест в 09:00
+
+*━━━━━━━━━━━━━━━━━*
+*ℹ️ ВАЖНАЯ ИНФОРМАЦИЯ:*
+━━━━━━━━━━━━━━━━━
+
+• Дайджесты отправляются ежедневно в 09:00 (МСК)
+• Анализ выполняется через Claude AI
+• Данные хранятся в защищенной БД
+• Проверка новых постов каждый час
 """
 
-        await query.edit_message_text(help_text, parse_mode='Markdown')
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
+            await query.edit_message_text(help_text, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(help_text, parse_mode='Markdown')
 
     def setup(self) -> Application:
         """Настроить приложение Telegram"""
@@ -396,6 +516,18 @@ class TelegramBot:
         )
         self.application.add_handler(
             CallbackQueryHandler(self.help_command, pattern='^help$')
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self.settings_digest_time, pattern='^digest_time$')
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self.settings_min_relevance, pattern='^min_relevance$')
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self.back_to_menu, pattern='^back$')
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self.back_to_menu, pattern='^settings$')
         )
 
         return self.application
