@@ -1,61 +1,25 @@
 import os
-import sqlite3
 import logging
+import psycopg2
+from psycopg2 import sql
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
 class DatabaseInitializer:
-    """Инициализация SQLite базы данных"""
+    """Инициализация PostgreSQL базы данных"""
 
-    def __init__(self, db_path: str = 'database/instagram_monitor.db'):
-        self.db_path = db_path
-        self.db_dir = os.path.dirname(db_path) or 'database'
+    def __init__(self, db_url: str = None):
+        if db_url is None:
+            db_url = os.getenv('DATABASE_URL')
+            if not db_url:
+                raise ValueError("DATABASE_URL environment variable is required")
+        self.db_url = db_url
 
-    def ensure_database_dir(self) -> None:
-        """Создать директорию для БД если её нет"""
-        os.makedirs(self.db_dir, exist_ok=True)
-        logger.info(f"Database directory ensured: {self.db_dir}")
-
-    def get_connection(self) -> sqlite3.Connection:
-        """Получить подключение к БД с включенными foreign keys"""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute('PRAGMA foreign_keys = ON')
-        return conn
-
-    def migrate_tables(self) -> None:
-        """Миграция существующих таблиц"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-
-            # Добавить новые колонки если их нет
-            try:
-                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN user_id INTEGER')
-            except sqlite3.OperationalError:
-                pass
-
-            try:
-                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN num_posts INTEGER DEFAULT 10')
-            except sqlite3.OperationalError:
-                pass
-
-            try:
-                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN min_likes INTEGER DEFAULT 0')
-            except sqlite3.OperationalError:
-                pass
-
-            try:
-                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN check_interval_hours INTEGER DEFAULT 24')
-            except sqlite3.OperationalError:
-                pass
-
-            try:
-                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN next_check TIMESTAMP')
-            except sqlite3.OperationalError:
-                pass
-
-            conn.commit()
+    def get_connection(self):
+        """Получить подключение к БД"""
+        return psycopg2.connect(self.db_url)
 
     def create_tables(self) -> None:
         """Создать все необходимые таблицы"""
@@ -65,8 +29,8 @@ class DatabaseInitializer:
             # Таблица monitored_accounts
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS monitored_accounts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
                     username TEXT UNIQUE NOT NULL,
                     session_key TEXT,
                     num_posts INTEGER DEFAULT 10,
@@ -82,8 +46,8 @@ class DatabaseInitializer:
             # Таблица posts
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS posts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    account_id INTEGER NOT NULL,
+                    id SERIAL PRIMARY KEY,
+                    account_id INTEGER NOT NULL REFERENCES monitored_accounts(id),
                     post_id TEXT NOT NULL,
                     url TEXT,
                     caption TEXT,
@@ -91,7 +55,6 @@ class DatabaseInitializer:
                     media_path TEXT,
                     content_hash TEXT UNIQUE,
                     fetched_at TIMESTAMP,
-                    FOREIGN KEY (account_id) REFERENCES monitored_accounts(id),
                     UNIQUE (account_id, post_id)
                 )
             ''')
@@ -104,16 +67,15 @@ class DatabaseInitializer:
             # Таблица filter_results
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS filter_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    post_id INTEGER NOT NULL UNIQUE,
+                    id SERIAL PRIMARY KEY,
+                    post_id INTEGER NOT NULL UNIQUE REFERENCES posts(id),
                     is_ad INTEGER DEFAULT 0,
                     is_greeting INTEGER DEFAULT 0,
                     is_personal INTEGER DEFAULT 0,
                     engagement_rate REAL,
                     text_length INTEGER,
                     has_media INTEGER DEFAULT 0,
-                    analyzed_at TIMESTAMP,
-                    FOREIGN KEY (post_id) REFERENCES posts(id)
+                    analyzed_at TIMESTAMP
                 )
             ''')
 
@@ -123,8 +85,8 @@ class DatabaseInitializer:
             # Таблица analyses
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS analyses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    post_id INTEGER NOT NULL UNIQUE,
+                    id SERIAL PRIMARY KEY,
+                    post_id INTEGER NOT NULL UNIQUE REFERENCES posts(id),
                     sentiment TEXT,
                     key_topics TEXT,
                     brand_mentions TEXT,
@@ -133,15 +95,14 @@ class DatabaseInitializer:
                     relevance_score REAL,
                     viral_potential TEXT,
                     recommendations TEXT,
-                    analyzed_at TIMESTAMP,
-                    FOREIGN KEY (post_id) REFERENCES posts(id)
+                    analyzed_at TIMESTAMP
                 )
             ''')
 
             # Таблица для дневной статистики
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS daily_stats (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     date DATE UNIQUE,
                     total_posts INTEGER DEFAULT 0,
                     avg_relevance REAL DEFAULT 0,
@@ -161,8 +122,8 @@ class DatabaseInitializer:
             # Таблица telegram_users
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS telegram_users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER UNIQUE NOT NULL,
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE NOT NULL,
                     username TEXT,
                     monitored_accounts TEXT,
                     created_at TIMESTAMP,
@@ -178,36 +139,38 @@ class DatabaseInitializer:
 
     def verify_database(self) -> bool:
         """Проверить создание всех таблиц"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
 
-            required_tables = [
-                'monitored_accounts',
-                'posts',
-                'filter_results',
-                'analyses',
-                'telegram_users'
-            ]
+                required_tables = [
+                    'monitored_accounts',
+                    'posts',
+                    'filter_results',
+                    'analyses',
+                    'telegram_users'
+                ]
 
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            )
-            existing_tables = [row[0] for row in cursor.fetchall()]
+                cursor.execute(
+                    "SELECT tablename FROM pg_tables WHERE schemaname='public'"
+                )
+                existing_tables = [row[0] for row in cursor.fetchall()]
 
-            missing = set(required_tables) - set(existing_tables)
-            if missing:
-                logger.error(f"Missing tables: {missing}")
-                return False
+                missing = set(required_tables) - set(existing_tables)
+                if missing:
+                    logger.error(f"Missing tables: {missing}")
+                    return False
 
-            logger.info(f"All required tables verified: {required_tables}")
-            return True
+                logger.info(f"All required tables verified: {required_tables}")
+                return True
+        except Exception as e:
+            logger.error(f"Database verification failed: {e}")
+            return False
 
     def initialize(self) -> bool:
         """Полная инициализация БД"""
         try:
-            self.ensure_database_dir()
             self.create_tables()
-            self.migrate_tables()
             success = self.verify_database()
 
             if success:

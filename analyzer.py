@@ -1,6 +1,6 @@
 import re
 import json
-import sqlite3
+import psycopg2
 import logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
@@ -242,8 +242,8 @@ class InsightGenerator:
 class Analyzer:
     """Основной анализатор"""
 
-    def __init__(self, db_path: str, claude_api_key: str):
-        self.db_path = db_path
+    def __init__(self, db_url: str, claude_api_key: str):
+        self.db_url = db_url
         self.text_analyzer = TextAnalyzer(claude_api_key)
         self.image_analyzer = ImageAnalyzer()
         self.insight_generator = InsightGenerator()
@@ -298,16 +298,26 @@ class Analyzer:
             'analyzed_at': datetime.utcnow().isoformat()
         }
 
-    def _insert_analysis(self, cursor: sqlite3.Cursor, analysis: Dict, filter_id: int) -> None:
+    def _insert_analysis(self, cursor, analysis: Dict, post_id: int) -> None:
         """Вставить анализ в БД"""
         try:
             cursor.execute('''
-                INSERT OR REPLACE INTO analyses
+                INSERT INTO analyses
                 (post_id, sentiment, key_topics, brand_mentions, audience_segment,
                  content_quality, relevance_score, viral_potential, recommendations, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (post_id) DO UPDATE SET
+                sentiment = EXCLUDED.sentiment,
+                key_topics = EXCLUDED.key_topics,
+                brand_mentions = EXCLUDED.brand_mentions,
+                audience_segment = EXCLUDED.audience_segment,
+                content_quality = EXCLUDED.content_quality,
+                relevance_score = EXCLUDED.relevance_score,
+                viral_potential = EXCLUDED.viral_potential,
+                recommendations = EXCLUDED.recommendations,
+                analyzed_at = EXCLUDED.analyzed_at
             ''', (
-                analysis['post_id'],
+                post_id,
                 analysis['sentiment'],
                 json.dumps(analysis['key_topics']),
                 json.dumps(analysis['brand_mentions']),
@@ -330,16 +340,19 @@ class Analyzer:
             results.append(analysis)
 
         # Сохранить в БД
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('PRAGMA foreign_keys = ON')
-            cursor = conn.cursor()
+        conn = psycopg2.connect(self.db_url)
+        cursor = conn.cursor()
 
+        try:
             for analysis in results:
-                cursor.execute('SELECT id FROM posts WHERE post_id = ?', (analysis['post_id'],))
+                cursor.execute('SELECT id FROM posts WHERE post_id = %s', (analysis['post_id'],))
                 post_row = cursor.fetchone()
                 if post_row:
                     self._insert_analysis(cursor, analysis, post_row[0])
 
             conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
 
         return results

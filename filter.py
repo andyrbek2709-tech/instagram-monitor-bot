@@ -1,5 +1,5 @@
 import re
-import sqlite3
+import psycopg2
 import logging
 import json
 import time
@@ -199,19 +199,27 @@ class MetadataAnalyzer:
 class Filter:
     """Основной фильтр для orchestration"""
 
-    def __init__(self, db_path: str, openai_api_key: str):
-        self.db_path = db_path
+    def __init__(self, db_url: str, openai_api_key: str):
+        self.db_url = db_url
         self.content_filter = ContentFilter(openai_api_key)
         self.ad_detector = AdDetector()
         self.metadata_analyzer = MetadataAnalyzer()
 
-    def _insert_filter_result(self, cursor: sqlite3.Cursor, post_id: int, result: Dict) -> None:
+    def _insert_filter_result(self, cursor, post_id: int, result: Dict) -> None:
         """Вставить результат фильтра в БД"""
         try:
             cursor.execute('''
-                INSERT OR REPLACE INTO filter_results
+                INSERT INTO filter_results
                 (post_id, is_ad, is_greeting, is_personal, engagement_rate, text_length, has_media, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (post_id) DO UPDATE SET
+                is_ad = EXCLUDED.is_ad,
+                is_greeting = EXCLUDED.is_greeting,
+                is_personal = EXCLUDED.is_personal,
+                engagement_rate = EXCLUDED.engagement_rate,
+                text_length = EXCLUDED.text_length,
+                has_media = EXCLUDED.has_media,
+                analyzed_at = EXCLUDED.analyzed_at
             ''', (
                 post_id,
                 1 if result.get('is_ad') else 0,
@@ -253,17 +261,20 @@ class Filter:
             results.append(result)
 
         # Сохранить в БД
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('PRAGMA foreign_keys = ON')
-            cursor = conn.cursor()
+        conn = psycopg2.connect(self.db_url)
+        cursor = conn.cursor()
 
+        try:
             for result in results:
                 # Получить post_id из таблицы posts
-                cursor.execute('SELECT id FROM posts WHERE post_id = ?', (result['post_id'],))
+                cursor.execute('SELECT id FROM posts WHERE post_id = %s', (result['post_id'],))
                 post_row = cursor.fetchone()
                 if post_row:
                     self._insert_filter_result(cursor, post_row[0], result)
 
             conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
 
         return results

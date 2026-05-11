@@ -1,4 +1,4 @@
-import sqlite3
+import psycopg2
 import logging
 from typing import Dict, List, Tuple
 from datetime import datetime, timedelta
@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 class AccountValidator:
     """Валидация и проверка статуса Instagram аккаунтов"""
 
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, db_url: str):
+        self.db_url = db_url
 
     def validate_account_exists(self, client: Client, username: str) -> Tuple[bool, str]:
         """Проверить существование аккаунта"""
@@ -45,15 +45,17 @@ class AccountValidator:
     def mark_account_invalid(self, username: str) -> bool:
         """Отметить аккаунт как неактивный"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    'UPDATE monitored_accounts SET is_active = 0 WHERE username = ?',
-                    (username,)
-                )
-                conn.commit()
-                logger.info(f"Marked account {username} as inactive")
-                return True
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE monitored_accounts SET is_active = 0 WHERE username = %s',
+                (username,)
+            )
+            conn.commit()
+            cursor.close()
+            conn.close()
+            logger.info(f"Marked account {username} as inactive")
+            return True
         except Exception as e:
             logger.error(f"Error marking account invalid: {e}")
             return False
@@ -61,30 +63,33 @@ class AccountValidator:
     def check_stale_accounts(self, stale_days: int = 7) -> List[Dict]:
         """Найти аккаунты, которые давно не обновлялись"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cutoff_date = (datetime.utcnow() - timedelta(days=stale_days)).isoformat()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            cutoff_date = (datetime.utcnow() - timedelta(days=stale_days)).isoformat()
 
-                cursor.execute('''
-                    SELECT id, username, last_fetch
-                    FROM monitored_accounts
-                    WHERE is_active = 1
-                    AND (last_fetch IS NULL OR last_fetch < ?)
-                    ORDER BY last_fetch ASC
-                ''', (cutoff_date,))
+            cursor.execute('''
+                SELECT id, username, last_fetch
+                FROM monitored_accounts
+                WHERE is_active = 1
+                AND (last_fetch IS NULL OR last_fetch < %s)
+                ORDER BY last_fetch ASC
+            ''', (cutoff_date,))
 
-                stale_accounts = []
-                for row in cursor.fetchall():
-                    stale_accounts.append({
-                        'id': row[0],
-                        'username': row[1],
-                        'last_fetch': row[2]
-                    })
+            stale_accounts = []
+            for row in cursor.fetchall():
+                stale_accounts.append({
+                    'id': row[0],
+                    'username': row[1],
+                    'last_fetch': row[2]
+                })
 
-                if stale_accounts:
-                    logger.warning(f"Found {len(stale_accounts)} stale accounts")
+            cursor.close()
+            conn.close()
 
-                return stale_accounts
+            if stale_accounts:
+                logger.warning(f"Found {len(stale_accounts)} stale accounts")
+
+            return stale_accounts
 
         except Exception as e:
             logger.error(f"Error checking stale accounts: {e}")
@@ -93,13 +98,15 @@ class AccountValidator:
     def verify_all_accounts(self, client: Client) -> Dict[str, List[str]]:
         """Проверить все активные аккаунты"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
 
-                cursor.execute(
-                    'SELECT username FROM monitored_accounts WHERE is_active = 1'
-                )
-                usernames = [row[0] for row in cursor.fetchall()]
+            cursor.execute(
+                'SELECT username FROM monitored_accounts WHERE is_active = 1'
+            )
+            usernames = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            conn.close()
 
             valid_accounts = []
             invalid_accounts = []

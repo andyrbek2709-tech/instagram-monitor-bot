@@ -1,6 +1,5 @@
 import os
 import logging
-import sqlite3
 from datetime import datetime
 from typing import List, Dict
 from dotenv import load_dotenv
@@ -52,13 +51,14 @@ class InstagramMonitorBotPipeline:
         self.validator = None
 
         # Пути
-        self.db_path = os.getenv('DATABASE_PATH', 'database/instagram_monitor.db')
+        self.db_url = os.getenv('DATABASE_URL')
         self.instagram_username = os.getenv('INSTAGRAM_USERNAME')
         self.instagram_password = os.getenv('INSTAGRAM_PASSWORD')
 
     def validate_environment(self) -> bool:
         """Проверить наличие всех необходимых переменных окружения"""
         required_env_vars = [
+            'DATABASE_URL',
             'TELEGRAM_BOT_TOKEN',
             'OPENAI_API_KEY',
             'CLAUDE_API_KEY',
@@ -97,23 +97,23 @@ class InstagramMonitorBotPipeline:
         """Инициализировать все компоненты"""
         try:
             # Инициализировать БД
-            db_init = DatabaseInitializer(self.db_path)
+            db_init = DatabaseInitializer(self.db_url)
             if not db_init.initialize():
                 return False
 
             # Создать компоненты
-            self.parser = Parser(self.db_path)
-            self.filter = Filter(self.db_path, os.getenv('OPENAI_API_KEY'))
-            self.analyzer = Analyzer(self.db_path, os.getenv('CLAUDE_API_KEY'))
+            self.parser = Parser(self.db_url)
+            self.filter = Filter(self.db_url, os.getenv('OPENAI_API_KEY'))
+            self.analyzer = Analyzer(self.db_url, os.getenv('CLAUDE_API_KEY'))
             self.telegram_bot = TelegramBot(
                 os.getenv('TELEGRAM_BOT_TOKEN'),
-                self.db_path,
+                self.db_url,
                 parser=self.parser,
                 filter_obj=self.filter,
                 analyzer=self.analyzer
             )
-            self.maintenance = DataMaintenance(self.db_path)
-            self.validator = AccountValidator(self.db_path)
+            self.maintenance = DataMaintenance(self.db_url)
+            self.validator = AccountValidator(self.db_url)
 
             logger.info("All components initialized successfully")
             return True
@@ -172,7 +172,7 @@ class InstagramMonitorBotPipeline:
             self.telegram_bot.setup()
 
             # Запустить планировщик
-            self.scheduler_manager = SchedulerManager(self.telegram_bot, self.db_path)
+            self.scheduler_manager = SchedulerManager(self.telegram_bot, self.db_url)
             self.scheduler_manager.start_scheduler()
 
             # Запустить бота
@@ -211,7 +211,7 @@ def main():
     pipeline.telegram_bot.setup()
 
     # Запустить планировщик
-    pipeline.scheduler_manager = SchedulerManager(pipeline.telegram_bot, pipeline.db_path)
+    pipeline.scheduler_manager = SchedulerManager(pipeline.telegram_bot, pipeline.db_url)
     pipeline.scheduler_manager.start_scheduler()
 
     # Запустить бота с polling (это блокирующий вызов, управляет собственным event loop)

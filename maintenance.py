@@ -1,4 +1,4 @@
-import sqlite3
+import psycopg2
 import logging
 from datetime import datetime, timedelta
 from typing import List
@@ -9,36 +9,31 @@ logger = logging.getLogger(__name__)
 class DataMaintenance:
     """Обслуживание базы данных"""
 
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, db_url: str):
+        self.db_url = db_url
 
     def cleanup_old_posts(self, days_to_keep: int = 90) -> int:
         """Удалить посты старше указанного периода"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cutoff_date = (datetime.utcnow() - timedelta(days=days_to_keep)).isoformat()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            cutoff_date = (datetime.utcnow() - timedelta(days=days_to_keep)).isoformat()
 
-                # Получить ID постов для удаления
-                cursor.execute(
-                    'SELECT id FROM posts WHERE fetched_at < ?',
-                    (cutoff_date,)
-                )
-                post_ids = [row[0] for row in cursor.fetchall()]
+            cursor.execute('DELETE FROM filter_results WHERE post_id IN (SELECT id FROM posts WHERE fetched_at < %s)', (cutoff_date,))
+            cursor.execute('DELETE FROM analyses WHERE post_id IN (SELECT id FROM posts WHERE fetched_at < %s)', (cutoff_date,))
+            cursor.execute('DELETE FROM posts WHERE fetched_at < %s', (cutoff_date,))
 
-                if not post_ids:
-                    logger.info("No old posts to cleanup")
-                    return 0
+            deleted = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            conn.close()
 
-                # Удалить связанные записи
-                placeholders = ','.join('?' * len(post_ids))
-                cursor.execute(f'DELETE FROM filter_results WHERE post_id IN ({placeholders})', post_ids)
-                cursor.execute(f'DELETE FROM analyses WHERE post_id IN ({placeholders})', post_ids)
-                cursor.execute(f'DELETE FROM posts WHERE id IN ({placeholders})', post_ids)
+            if deleted == 0:
+                logger.info("No old posts to cleanup")
+                return 0
 
-                conn.commit()
-                logger.info(f"Cleaned up {len(post_ids)} old posts")
-                return len(post_ids)
+            logger.info(f"Cleaned up {deleted} old posts")
+            return deleted
 
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
@@ -67,19 +62,19 @@ class DataMaintenance:
     def archive_old_stats(self, days_to_keep: int = 365) -> int:
         """Архивировать старые статистики"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cutoff_date = (datetime.utcnow() - timedelta(days=days_to_keep)).isoformat()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            cutoff_date = (datetime.utcnow() - timedelta(days=days_to_keep)).date()
 
-                cursor.execute(
-                    'DELETE FROM daily_stats WHERE date < ?',
-                    (cutoff_date,)
-                )
+            cursor.execute('DELETE FROM daily_stats WHERE date < %s', (cutoff_date,))
 
-                conn.commit()
-                deleted = cursor.rowcount
-                logger.info(f"Archived {deleted} old stats")
-                return deleted
+            deleted = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            logger.info(f"Archived {deleted} old stats")
+            return deleted
 
         except Exception as e:
             logger.error(f"Error archiving stats: {e}")
@@ -88,44 +83,57 @@ class DataMaintenance:
     def generate_daily_stats(self) -> bool:
         """Генерировать ежедневную статистику"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                today = datetime.utcnow().date().isoformat()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            today = datetime.utcnow().date()
 
-                # Получить статистику за день
-                cursor.execute('''
-                    SELECT
-                        COUNT(*) as total_posts,
-                        AVG(a.relevance_score) as avg_relevance,
-                        SUM(CASE WHEN a.relevance_score > 0.7 THEN 1 ELSE 0 END) as high_relevance,
-                        SUM(CASE WHEN a.viral_potential = 'high' THEN 1 ELSE 0 END) as viral_count,
-                        SUM(CASE WHEN a.sentiment = 'positive' THEN 1 ELSE 0 END) as positive,
-                        SUM(CASE WHEN a.sentiment = 'negative' THEN 1 ELSE 0 END) as negative,
-                        SUM(CASE WHEN a.sentiment = 'neutral' THEN 1 ELSE 0 END) as neutral
-                    FROM analyses a
-                    WHERE DATE(a.analyzed_at) = ?
-                ''', (today,))
+            cursor.execute('''
+                SELECT
+                    COUNT(*) as total_posts,
+                    AVG(a.relevance_score) as avg_relevance,
+                    SUM(CASE WHEN a.relevance_score > 0.7 THEN 1 ELSE 0 END) as high_relevance,
+                    SUM(CASE WHEN a.viral_potential = 'high' THEN 1 ELSE 0 END) as viral_count,
+                    SUM(CASE WHEN a.sentiment = 'positive' THEN 1 ELSE 0 END) as positive,
+                    SUM(CASE WHEN a.sentiment = 'negative' THEN 1 ELSE 0 END) as negative,
+                    SUM(CASE WHEN a.sentiment = 'neutral' THEN 1 ELSE 0 END) as neutral
+                FROM analyses a
+                WHERE a.analyzed_at::date = %s
+            ''', (today,))
 
-                row = cursor.fetchone()
-                if not row or row[0] == 0:
-                    logger.info(f"No posts analyzed today")
-                    return False
+            row = cursor.fetchone()
+            if not row or row[0] == 0:
+                logger.info(f"No posts analyzed today")
+                cursor.close()
+                conn.close()
+                return False
 
-                total, avg_rel, high_rel, viral, pos, neg, neut = row
+            total, avg_rel, high_rel, viral, pos, neg, neut = row
 
-                cursor.execute('''
-                    INSERT OR REPLACE INTO daily_stats
-                    (date, total_posts, avg_relevance, high_relevance_count, viral_count,
-                     sentiment_positive, sentiment_negative, sentiment_neutral, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    today, int(total), avg_rel or 0, int(high_rel or 0), int(viral or 0),
-                    int(pos or 0), int(neg or 0), int(neut or 0), datetime.utcnow().isoformat()
-                ))
+            cursor.execute('''
+                INSERT INTO daily_stats
+                (date, total_posts, avg_relevance, high_relevance_count, viral_count,
+                 sentiment_positive, sentiment_negative, sentiment_neutral, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (date) DO UPDATE SET
+                total_posts = EXCLUDED.total_posts,
+                avg_relevance = EXCLUDED.avg_relevance,
+                high_relevance_count = EXCLUDED.high_relevance_count,
+                viral_count = EXCLUDED.viral_count,
+                sentiment_positive = EXCLUDED.sentiment_positive,
+                sentiment_negative = EXCLUDED.sentiment_negative,
+                sentiment_neutral = EXCLUDED.sentiment_neutral,
+                created_at = EXCLUDED.created_at
+            ''', (
+                today, int(total), avg_rel or 0, int(high_rel or 0), int(viral or 0),
+                int(pos or 0), int(neg or 0), int(neut or 0), datetime.utcnow().isoformat()
+            ))
 
-                conn.commit()
-                logger.info(f"Generated daily stats for {today}: {int(total)} posts")
-                return True
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            logger.info(f"Generated daily stats for {today}: {int(total)} posts")
+            return True
 
         except Exception as e:
             logger.error(f"Error generating daily stats: {e}")

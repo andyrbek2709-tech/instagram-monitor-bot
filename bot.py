@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import psycopg2
 import json
 import logging
 import asyncio
@@ -94,9 +94,9 @@ class DigestFormatter:
 class TelegramBot:
     """Telegram бот с обработчиками команд"""
 
-    def __init__(self, token: str, db_path: str, parser=None, filter_obj=None, analyzer=None):
+    def __init__(self, token: str, db_url: str, parser=None, filter_obj=None, analyzer=None):
         self.token = token
-        self.db_path = db_path
+        self.db_url = db_url
         self.application = None
         self.parser = parser
         self.filter = filter_obj
@@ -205,23 +205,26 @@ class TelegramBot:
         user_id = context.user_data.get('user_id')
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                next_check = datetime.utcnow() + timedelta(hours=interval_hours)
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            next_check = datetime.utcnow() + timedelta(hours=interval_hours)
 
-                cursor.execute(
-                    '''INSERT OR IGNORE INTO monitored_accounts
-                       (user_id, username, num_posts, check_interval_hours, next_check, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?)''',
-                    (user_id, username, num_posts, interval_hours, next_check.isoformat(),
-                     datetime.utcnow().isoformat())
-                )
+            cursor.execute(
+                '''INSERT INTO monitored_accounts
+                   (user_id, username, num_posts, check_interval_hours, next_check, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (username) DO NOTHING''',
+                (user_id, username, num_posts, interval_hours, next_check.isoformat(),
+                 datetime.utcnow().isoformat())
+            )
 
-                cursor.execute(
-                    'INSERT OR IGNORE INTO telegram_users (user_id, username, created_at) VALUES (?, ?, ?)',
-                    (user_id, update.effective_user.username or 'unknown', datetime.utcnow().isoformat())
-                )
-                conn.commit()
+            cursor.execute(
+                'INSERT INTO telegram_users (user_id, username, created_at) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO NOTHING',
+                (user_id, update.effective_user.username or 'unknown', datetime.utcnow().isoformat())
+            )
+            conn.commit()
+            cursor.close()
+            conn.close()
 
             interval_text = {1: "каждый час", 6: "каждые 6 часов", 24: "каждый день"}.get(interval_hours)
             await query.edit_message_text(
@@ -245,10 +248,12 @@ class TelegramBot:
         await query.answer()
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT username, last_fetch FROM monitored_accounts')
-                accounts = cursor.fetchall()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            cursor.execute('SELECT username, last_fetch FROM monitored_accounts')
+            accounts = cursor.fetchall()
+            cursor.close()
+            conn.close()
 
             if accounts:
                 text = "📱 *Отслеживаемые аккаунты:*\n\n"
@@ -268,29 +273,31 @@ class TelegramBot:
         await query.answer()
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
 
-                # Получить анализы за последние 24 часа
-                since = datetime.utcnow() - timedelta(hours=24)
-                cursor.execute('''
-                    SELECT a.sentiment, a.key_topics, a.relevance_score,
-                           a.viral_potential, a.recommendations
-                    FROM analyses a
-                    WHERE a.analyzed_at > ?
-                    ORDER BY a.relevance_score DESC
-                ''', (since.isoformat(),))
+            since = datetime.utcnow() - timedelta(hours=24)
+            cursor.execute('''
+                SELECT a.sentiment, a.key_topics, a.relevance_score,
+                       a.viral_potential, a.recommendations
+                FROM analyses a
+                WHERE a.analyzed_at > %s
+                ORDER BY a.relevance_score DESC
+            ''', (since.isoformat(),))
 
-                rows = cursor.fetchall()
-                analyses = []
-                for row in rows:
-                    analyses.append({
-                        'sentiment': row[0],
-                        'key_topics': json.loads(row[1]),
-                        'relevance_score': row[2],
-                        'viral_potential': row[3],
-                        'recommendations': json.loads(row[4])
-                    })
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+
+            analyses = []
+            for row in rows:
+                analyses.append({
+                    'sentiment': row[0],
+                    'key_topics': json.loads(row[1]),
+                    'relevance_score': row[2],
+                    'viral_potential': row[3],
+                    'recommendations': json.loads(row[4])
+                })
 
             digest_text = DigestFormatter.format_daily_digest(analyses)
             await query.edit_message_text(digest_text, parse_mode='Markdown')
@@ -391,34 +398,36 @@ class TelegramBot:
         await query.answer()
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
 
-                # Общая статистика
-                cursor.execute('SELECT COUNT(*) FROM posts')
-                total_posts = cursor.fetchone()[0]
+            cursor.execute('SELECT COUNT(*) FROM posts')
+            total_posts = cursor.fetchone()[0]
 
-                cursor.execute('SELECT COUNT(*) FROM monitored_accounts WHERE is_active = 1')
-                active_accounts = cursor.fetchone()[0]
+            cursor.execute('SELECT COUNT(*) FROM monitored_accounts WHERE is_active = 1')
+            active_accounts = cursor.fetchone()[0]
 
-                cursor.execute('SELECT AVG(relevance_score) FROM analyses')
-                avg_relevance = cursor.fetchone()[0] or 0
+            cursor.execute('SELECT AVG(relevance_score) FROM analyses')
+            avg_relevance = cursor.fetchone()[0] or 0
 
-                cursor.execute('''
-                    SELECT COUNT(*) FROM analyses
-                    WHERE relevance_score > 0.7
-                    AND analyzed_at > datetime('now', '-7 days')
-                ''')
-                high_relevance_7d = cursor.fetchone()[0]
+            cursor.execute('''
+                SELECT COUNT(*) FROM analyses
+                WHERE relevance_score > 0.7
+                AND analyzed_at > NOW() - INTERVAL '7 days'
+            ''')
+            high_relevance_7d = cursor.fetchone()[0]
 
-                cursor.execute('''
-                    SELECT COUNT(*) FROM analyses
-                    WHERE viral_potential = 'high'
-                    AND analyzed_at > datetime('now', '-7 days')
-                ''')
-                viral_7d = cursor.fetchone()[0]
+            cursor.execute('''
+                SELECT COUNT(*) FROM analyses
+                WHERE viral_potential = 'high'
+                AND analyzed_at > NOW() - INTERVAL '7 days'
+            ''')
+            viral_7d = cursor.fetchone()[0]
 
-                stats_text = f"""
+            cursor.close()
+            conn.close()
+
+            stats_text = f"""
 📊 *Статистика бота*
 
 *Общие показатели:*
@@ -432,7 +441,7 @@ class TelegramBot:
 
 Обновляется каждый день в 09:00
 """
-                await query.edit_message_text(stats_text, parse_mode='Markdown')
+            await query.edit_message_text(stats_text, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error getting stats: {e}")
             await query.edit_message_text("❌ Ошибка при получении статистики")
@@ -444,14 +453,16 @@ class TelegramBot:
 
         try:
             user_id = update.effective_user.id
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                settings = json.dumps({"paused": True, "paused_at": datetime.utcnow().isoformat()})
-                cursor.execute(
-                    'UPDATE telegram_users SET settings = ? WHERE user_id = ?',
-                    (settings, user_id)
-                )
-                conn.commit()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            settings = json.dumps({"paused": True, "paused_at": datetime.utcnow().isoformat()})
+            cursor.execute(
+                'UPDATE telegram_users SET settings = %s WHERE user_id = %s',
+                (settings, user_id)
+            )
+            conn.commit()
+            cursor.close()
+            conn.close()
 
             keyboard = [
                 [InlineKeyboardButton("▶️ Возобновить", callback_data='resume')],
@@ -478,25 +489,25 @@ class TelegramBot:
         try:
             user_id = update.effective_user.id
 
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
 
-                # Получить активные аккаунты этого пользователя
-                cursor.execute('''
-                    SELECT id, username, last_fetch, is_active
-                    FROM monitored_accounts
-                    WHERE user_id = ? OR (user_id IS NULL)
-                    ORDER BY is_active DESC, last_fetch DESC
-                ''', (user_id,))
-                accounts = cursor.fetchall()
+            cursor.execute('''
+                SELECT id, username, last_fetch, is_active
+                FROM monitored_accounts
+                WHERE user_id = %s OR (user_id IS NULL)
+                ORDER BY is_active DESC, last_fetch DESC
+            ''', (user_id,))
+            accounts = cursor.fetchall()
 
-                # Возобновить мониторинг
-                settings = json.dumps({"paused": False, "resumed_at": datetime.utcnow().isoformat()})
-                cursor.execute(
-                    'UPDATE telegram_users SET settings = ? WHERE user_id = ?',
-                    (settings, user_id)
-                )
-                conn.commit()
+            settings = json.dumps({"paused": False, "resumed_at": datetime.utcnow().isoformat()})
+            cursor.execute(
+                'UPDATE telegram_users SET settings = %s WHERE user_id = %s',
+                (settings, user_id)
+            )
+            conn.commit()
+            cursor.close()
+            conn.close()
 
             # Построить список активных аккаунтов
             if accounts:
@@ -561,16 +572,17 @@ class TelegramBot:
             )
 
             user_id = update.effective_user.id
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
 
-                # Получить все активные аккаунты пользователя
-                cursor.execute('''
-                    SELECT id, username, num_posts, min_likes, check_interval_hours
-                    FROM monitored_accounts
-                    WHERE (user_id = ? OR user_id IS NULL) AND is_active = 1
-                ''', (user_id,))
-                accounts = cursor.fetchall()
+            cursor.execute('''
+                SELECT id, username, num_posts, min_likes, check_interval_hours
+                FROM monitored_accounts
+                WHERE (user_id = %s OR user_id IS NULL) AND is_active = 1
+            ''', (user_id,))
+            accounts = cursor.fetchall()
+            cursor.close()
+            conn.close()
 
             if not accounts:
                 await query.edit_message_text(
@@ -624,15 +636,16 @@ class TelegramBot:
                         # Анализировать посты
                         analyses = self.analyzer.process_posts(posts)
 
-                        # Обновить время последней проверки
-                        with sqlite3.connect(self.db_path) as conn:
-                            cursor = conn.cursor()
-                            next_check = datetime.utcnow() + timedelta(hours=check_interval_hours)
-                            cursor.execute(
-                                'UPDATE monitored_accounts SET last_fetch = ?, next_check = ? WHERE id = ?',
-                                (datetime.utcnow().isoformat(), next_check.isoformat(), acc_id)
-                            )
-                            conn.commit()
+                        conn = psycopg2.connect(self.db_url)
+                        cursor = conn.cursor()
+                        next_check = datetime.utcnow() + timedelta(hours=check_interval_hours)
+                        cursor.execute(
+                            'UPDATE monitored_accounts SET last_fetch = %s, next_check = %s WHERE id = %s',
+                            (datetime.utcnow().isoformat(), next_check.isoformat(), acc_id)
+                        )
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
 
                         total_posts += len(posts)
                         results.append({
@@ -830,9 +843,9 @@ class TelegramBot:
 class SchedulerManager:
     """Управление расписанием для ежедневных дайджестов с AsyncIO"""
 
-    def __init__(self, bot: TelegramBot, db_path: str):
+    def __init__(self, bot: TelegramBot, db_url: str):
         self.bot = bot
-        self.db_path = db_path
+        self.db_url = db_url
         self.scheduler = AsyncIOScheduler()
         self.scheduled_time = self._get_scheduled_time()
 
@@ -848,52 +861,56 @@ class SchedulerManager:
     async def daily_digest_job(self) -> None:
         """Ежедневная работа отправки дайджестов"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
 
-                # Получить всех активных пользователей
-                cursor.execute('SELECT id, user_id FROM telegram_users WHERE settings IS NULL OR json_extract(settings, "$.paused") = 0')
-                users = cursor.fetchall()
+            cursor.execute('''SELECT id, user_id FROM telegram_users
+                             WHERE settings IS NULL OR (settings::jsonb->>'paused')::boolean = false''')
+            users = cursor.fetchall()
 
-                if not users:
-                    logger.info("No active users for digest")
-                    return
+            if not users:
+                logger.info("No active users for digest")
+                cursor.close()
+                conn.close()
+                return
 
-                since = datetime.utcnow() - timedelta(hours=24)
+            since = datetime.utcnow() - timedelta(hours=24)
 
-                for user_db_id, user_id in users:
-                    try:
-                        # Получить анализы
-                        cursor.execute('''
-                            SELECT a.sentiment, a.key_topics, a.relevance_score,
-                                   a.viral_potential, a.recommendations
-                            FROM analyses a
-                            WHERE a.analyzed_at > ?
-                            ORDER BY a.relevance_score DESC
-                            LIMIT 20
-                        ''', (since.isoformat(),))
+            for user_db_id, user_id in users:
+                try:
+                    cursor.execute('''
+                        SELECT a.sentiment, a.key_topics, a.relevance_score,
+                               a.viral_potential, a.recommendations
+                        FROM analyses a
+                        WHERE a.analyzed_at > %s
+                        ORDER BY a.relevance_score DESC
+                        LIMIT 20
+                    ''', (since.isoformat(),))
 
-                        rows = cursor.fetchall()
-                        if not rows:
-                            logger.info(f"No new posts for user {user_id}")
-                            continue
+                    rows = cursor.fetchall()
+                    if not rows:
+                        logger.info(f"No new posts for user {user_id}")
+                        continue
 
-                        analyses = []
-                        for row in rows:
-                            analyses.append({
-                                'sentiment': row[0],
-                                'key_topics': json.loads(row[1]),
-                                'relevance_score': row[2],
-                                'viral_potential': row[3],
-                                'recommendations': json.loads(row[4])
-                            })
+                    analyses = []
+                    for row in rows:
+                        analyses.append({
+                            'sentiment': row[0],
+                            'key_topics': json.loads(row[1]),
+                            'relevance_score': row[2],
+                            'viral_potential': row[3],
+                            'recommendations': json.loads(row[4])
+                        })
 
-                        digest_text = DigestFormatter.format_daily_digest(analyses)
-                        await self.bot.send_digest_to_user(user_id, digest_text)
-                        logger.info(f"Sent digest to user {user_id} ({len(analyses)} posts)")
+                    digest_text = DigestFormatter.format_daily_digest(analyses)
+                    await self.bot.send_digest_to_user(user_id, digest_text)
+                    logger.info(f"Sent digest to user {user_id} ({len(analyses)} posts)")
 
-                    except Exception as e:
-                        logger.error(f"Error sending digest to user {user_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Error sending digest to user {user_id}: {e}")
+
+            cursor.close()
+            conn.close()
 
         except Exception as e:
             logger.error(f"Error in daily_digest_job: {e}")

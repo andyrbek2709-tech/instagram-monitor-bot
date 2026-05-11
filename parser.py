@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import psycopg2
 import hashlib
 import pickle
 import random
@@ -205,23 +205,24 @@ class MediaDownloader:
 class Parser:
     """Основной класс парсера для orchestration"""
 
-    def __init__(self, db_path: str, session_dir: str = 'data/sessions',
+    def __init__(self, db_url: str, session_dir: str = 'data/sessions',
                  media_dir: str = 'data/media'):
-        self.db_path = db_path
+        self.db_url = db_url
         self.login_manager = LoginManager(session_dir)
         self.media_downloader = MediaDownloader(media_dir)
         self.min_account_delay = 30
         self.max_account_delay = 90
 
-    def _insert_post(self, cursor: sqlite3.Cursor, account_id: int, post_data: Dict) -> bool:
+    def _insert_post(self, cursor, account_id: int, post_data: Dict) -> bool:
         """Вставить пост в базу данных"""
         try:
             content_hash = hashlib.sha256(post_data['caption'].encode()).hexdigest()
 
             cursor.execute('''
-                INSERT OR IGNORE INTO posts
+                INSERT INTO posts
                 (account_id, post_id, url, caption, media_type, content_hash, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
             ''', (
                 account_id,
                 post_data['post_id'],
@@ -232,7 +233,7 @@ class Parser:
                 post_data['fetched_at']
             ))
             return True
-        except sqlite3.IntegrityError:
+        except psycopg2.IntegrityError:
             logger.info(f"Post {post_data['post_id']} already exists")
             return False
 
@@ -241,7 +242,7 @@ class Parser:
         try:
             logger.info(f"[PARSE START] target={target_username}, login_as={login_username}, num_posts={num_posts}")
 
-            # Логин с основным аккаунтом (andreyfuture27) с сохранением сессии
+            # Логин с основным аккаунтом с сохранением сессии
             logger.info(f"[LOGIN] Attempting login as {login_username}...")
             client = self.login_manager.login(login_username, login_password)
             logger.info(f"[LOGIN OK] Successfully logged in as {login_username}")
@@ -262,12 +263,12 @@ class Parser:
                 return []
 
             # Сохранение в БД
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute('PRAGMA foreign_keys = ON')
-                cursor = conn.cursor()
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
 
+            try:
                 # Получить или создать запись аккаунта
-                cursor.execute('SELECT id FROM monitored_accounts WHERE username = ?', (target_username,))
+                cursor.execute('SELECT id FROM monitored_accounts WHERE username = %s', (target_username,))
                 result = cursor.fetchone()
 
                 if result:
@@ -275,9 +276,10 @@ class Parser:
                 else:
                     cursor.execute('''
                         INSERT INTO monitored_accounts (username, session_key, last_fetch, created_at)
-                        VALUES (?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
                     ''', (target_username, '', datetime.utcnow().isoformat(), datetime.utcnow().isoformat()))
-                    account_id = cursor.lastrowid
+                    account_id = cursor.fetchone()[0]
 
                 # Вставить посты
                 inserted = 0
@@ -287,6 +289,9 @@ class Parser:
 
                 conn.commit()
                 logger.info(f"Inserted {inserted} new posts for {target_username}")
+            finally:
+                cursor.close()
+                conn.close()
 
             return posts
 
