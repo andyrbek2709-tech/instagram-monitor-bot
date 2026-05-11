@@ -1,0 +1,17 @@
+[Unit]
+Description=Instagram Monitor Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/home/bot/instagram-monitor-bot
+EnvironmentFile=/home/bot/instagram-monitor-bot/.env
+ExecStart=/usr/bin/python3 /home/bot/instagram-monitor-bot/main.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/instagram-monitor-bot/output.log
+StandardError=append:/var/log/instagram-monitor-bot/error.log
+
+[Install]
+WantedBy=multi-user.target
