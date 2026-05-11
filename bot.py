@@ -283,28 +283,56 @@ class TelegramBot:
                        a.viral_potential, a.recommendations
                 FROM analyses a
                 WHERE a.analyzed_at > %s
-                ORDER BY a.relevance_score DESC
+                ORDER BY a.relevance_score DESC NULLS LAST
             ''', (since.isoformat(),))
 
             rows = cursor.fetchall()
-            cursor.close()
-            conn.close()
 
             analyses = []
             for row in rows:
                 analyses.append({
-                    'sentiment': row[0],
-                    'key_topics': json.loads(row[1]),
-                    'relevance_score': row[2],
-                    'viral_potential': row[3],
-                    'recommendations': json.loads(row[4])
+                    'sentiment': row[0] or 'neutral',
+                    'key_topics': json.loads(row[1]) if row[1] else [],
+                    'relevance_score': row[2] or 0,
+                    'viral_potential': row[3] or 'low',
+                    'recommendations': json.loads(row[4]) if row[4] else []
                 })
 
-            digest_text = DigestFormatter.format_daily_digest(analyses)
-            await query.edit_message_text(digest_text, parse_mode='Markdown')
+            if analyses:
+                digest_text = DigestFormatter.format_daily_digest(analyses)
+            else:
+                # Нет аналитики — показать сырые посты
+                cursor.execute('''
+                    SELECT p.caption, p.url, p.fetched_at, ma.username
+                    FROM posts p
+                    JOIN monitored_accounts ma ON p.account_id = ma.id
+                    WHERE p.fetched_at > %s
+                    ORDER BY p.fetched_at DESC
+                    LIMIT 10
+                ''', (since.isoformat(),))
+                post_rows = cursor.fetchall()
+
+                if post_rows:
+                    digest_text = "📋 *Посты за последние 24 часа*\n_(AI-анализ ещё не выполнен)_\n\n"
+                    for i, (caption, url, fetched_at, username) in enumerate(post_rows, 1):
+                        cap = (caption[:100] + '…') if caption and len(caption) > 100 else (caption or '_(без подписи)_')
+                        digest_text += f"*{i}. @{username}*\n{cap}\n"
+                        if url:
+                            digest_text += f"{url}\n"
+                        digest_text += "\n"
+                else:
+                    digest_text = "Нет новых постов за последние 24 часа"
+
+            cursor.close()
+            conn.close()
+
+            try:
+                await query.edit_message_text(digest_text, parse_mode='Markdown')
+            except Exception:
+                await query.edit_message_text(digest_text)
         except Exception as e:
-            logger.error(f"Error getting digest: {e}")
-            await query.edit_message_text("❌ Ошибка при получении дайджеста")
+            logger.error(f"Error getting digest: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка дайджеста: {type(e).__name__}: {str(e)[:200]}")
 
     async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Панель настроек"""
@@ -1045,11 +1073,11 @@ class SchedulerManager:
                     analyses = []
                     for row in rows:
                         analyses.append({
-                            'sentiment': row[0],
-                            'key_topics': json.loads(row[1]),
-                            'relevance_score': row[2],
-                            'viral_potential': row[3],
-                            'recommendations': json.loads(row[4])
+                            'sentiment': row[0] or 'neutral',
+                            'key_topics': json.loads(row[1]) if row[1] else [],
+                            'relevance_score': row[2] or 0,
+                            'viral_potential': row[3] or 'low',
+                            'recommendations': json.loads(row[4]) if row[4] else []
                         })
 
                     digest_text = DigestFormatter.format_daily_digest(analyses)
