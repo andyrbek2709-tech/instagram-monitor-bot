@@ -1127,7 +1127,12 @@ class TelegramBot:
             )
             result = message.content[0].text.strip()
 
+            # Сохранить контекст для "Создать промпт"
+            context.user_data['last_analysis'] = result
+            context.user_data['last_raw_content'] = caption
+
             keyboard = [
+                [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt')],
                 [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
                 [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
             ]
@@ -1148,6 +1153,76 @@ class TelegramBot:
             await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
 
         return ConversationHandler.END
+
+    async def create_prompt_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Сгенерировать готовый промпт для реализации идеи через Claude"""
+        query = update.callback_query
+        await query.answer()
+
+        analysis = context.user_data.get('last_analysis', '')
+        raw_content = context.user_data.get('last_raw_content', '')
+
+        if not analysis:
+            await query.edit_message_text(
+                "❌ Анализ не найден. Сначала разбери пост по ссылке.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔗 Разобрать пост", callback_data='analyze_url')
+                ]])
+            )
+            return
+
+        await query.edit_message_text("⚙️ Генерирую промпт для реализации...")
+
+        claude_key = os.getenv('CLAUDE_API_KEY')
+        if not claude_key:
+            await query.edit_message_text("❌ CLAUDE_API_KEY не задан в Railway")
+            return
+
+        try:
+            prompt = (
+                "На основе анализа видео-поста сгенерируй готовый промпт, который пользователь скопирует "
+                "и вставит в чат Claude или ChatGPT для реализации идеи из этого поста.\n\n"
+                "Промпт должен:\n"
+                "1. Содержать весь необходимый контекст (что за идея, откуда взята)\n"
+                "2. Чётко ставить задачу на реализацию (что нужно сделать)\n"
+                "3. Запрашивать: технологический стек, пошаговый план, с чего начать\n"
+                "4. Быть на русском языке\n"
+                "5. Начинаться с фразы: 'Я хочу реализовать следующую идею...'\n\n"
+                "ВАЖНО: выдай ТОЛЬКО сам промпт — без пояснений, без обёрток, "
+                "без 'вот твой промпт:'. Просто текст готового промпта.\n\n"
+                f"Анализ поста:\n{analysis}\n\n"
+                f"Исходный контент:\n{raw_content[:1500]}"
+            )
+
+            client = anthropic.Anthropic(api_key=claude_key)
+            message = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=800,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            ready_prompt = message.content[0].text.strip()
+
+            keyboard = [
+                [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
+                [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
+            ]
+
+            header = "📋 *Готовый промпт — скопируй и вставь в Claude:*\n\n"
+            try:
+                await query.edit_message_text(
+                    header + ready_prompt,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                await query.edit_message_text(
+                    f"Готовый промпт:\n\n{ready_prompt}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+        except Exception as e:
+            logger.error(f"create_prompt_action error: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка генерации промпта: {str(e)[:200]}")
 
     async def handle_instagram_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Получить пост по ссылке Instagram и показать содержимое"""
@@ -1368,10 +1443,15 @@ class TelegramBot:
             )
         )
 
-        # Claude-анализ поста
+        # Claude-анализ поста (кнопки на inline-сообщении)
         self.application.add_handler(
             CallbackQueryHandler(self.analyze_post_action,
                                  pattern='^analyze_(summary|ideas|adapt)$')
+        )
+
+        # Создать промпт для реализации
+        self.application.add_handler(
+            CallbackQueryHandler(self.create_prompt_action, pattern='^create_prompt$')
         )
 
         return self.application
