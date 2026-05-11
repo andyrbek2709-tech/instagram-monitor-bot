@@ -7,6 +7,7 @@ import time
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote
 from instagrapi import Client
 from instagrapi.exceptions import LoginRequired, ChallengeRequired, BadPassword, PleaseWaitFewMinutes
 
@@ -151,7 +152,9 @@ class LoginManager:
             log_to_db(self.db_url, username, 'LOGIN', 'INFO', 'Trying login_by_sessionid')
             try:
                 client = Client()
-                client.login_by_sessionid(sessionid)
+                # URL-decode: %3A -> : (браузер возвращает закодированную строку)
+                sessionid_clean = unquote(sessionid)
+                client.login_by_sessionid(sessionid_clean)
                 # Сохранить полные settings после успешного login_by_sessionid
                 self._save_session_to_db(username, client)
                 logger.info(f"[LOGIN] login_by_sessionid succeeded for {username}")
