@@ -60,45 +60,56 @@ class LoginManager:
 
     def login(self, username: str, password: str) -> Client:
         """Авторизоваться в Instagram с сохранением сессии и retry"""
+        logger.info(f"[LOGIN MANAGER] Attempting to login as {username}")
         # Попытка загрузить существующую сессию
         client = self._load_session(username)
         if client:
+            logger.info(f"[SESSION CACHE] Found saved session for {username}, validating...")
             try:
                 client.get_user_info(client.user_id)
-                logger.info(f"Using saved session for {username}")
+                logger.info(f"[SESSION VALID] Using saved session for {username}")
                 return client
-            except (LoginRequired, Exception):
-                logger.info(f"Saved session invalid for {username}, creating new")
+            except (LoginRequired, Exception) as e:
+                logger.warning(f"[SESSION INVALID] Saved session invalid for {username}: {e}, creating new")
 
         # Retry логин
+        logger.info(f"[LOGIN RETRY] Starting login retry loop for {username} (max {MAX_LOGIN_RETRIES} attempts)")
         for attempt in range(MAX_LOGIN_RETRIES):
             try:
+                logger.info(f"[LOGIN ATTEMPT {attempt + 1}/{MAX_LOGIN_RETRIES}] Creating new Instagram client...")
                 # Создать новый клиент (instagrapi ротирует User-Agent внутри)
                 client = Client()
+                logger.info(f"[LOGIN ATTEMPT {attempt + 1}] Client created, random delay before login...")
 
                 # Случайная задержка перед логином
                 delay = random.uniform(8, 20)
+                logger.info(f"[LOGIN ATTEMPT {attempt + 1}] Sleeping {delay:.1f}s...")
                 time.sleep(delay)
 
+                logger.info(f"[LOGIN ATTEMPT {attempt + 1}] Calling client.login({username}, ***)")
                 client.login(username, password)
-                logger.info(f"Successfully logged in as {username}")
+                logger.info(f"[LOGIN SUCCESS] Successfully logged in as {username}")
                 self._save_session(username, client)
                 return client
 
             except ChallengeRequired:
-                logger.error(f"Challenge required for {username} on attempt {attempt + 1}")
+                logger.error(f"[LOGIN CHALLENGE] Challenge required for {username} on attempt {attempt + 1}/attempt {MAX_LOGIN_RETRIES}")
                 if attempt < MAX_LOGIN_RETRIES - 1:
+                    logger.info(f"[LOGIN CHALLENGE] Retrying in {LOGIN_RETRY_DELAY}s...")
                     time.sleep(LOGIN_RETRY_DELAY)
                 else:
+                    logger.error(f"[LOGIN FAILED] Max attempts reached for challenge")
                     raise
             except LoginRequired:
-                logger.error(f"Invalid credentials for {username}")
+                logger.error(f"[LOGIN ERROR] Invalid credentials for {username}")
                 raise
             except Exception as e:
-                logger.warning(f"Login attempt {attempt + 1} failed for {username}: {e}")
+                logger.error(f"[LOGIN ATTEMPT {attempt + 1}] Failed: {type(e).__name__}: {e}")
                 if attempt < MAX_LOGIN_RETRIES - 1:
+                    logger.info(f"[LOGIN RETRY] Waiting {LOGIN_RETRY_DELAY}s before next attempt...")
                     time.sleep(LOGIN_RETRY_DELAY)
                 else:
+                    logger.error(f"[LOGIN FAILED] All {MAX_LOGIN_RETRIES} attempts exhausted")
                     raise
 
 
@@ -112,12 +123,17 @@ class PostFetcher:
 
     def fetch_posts(self, username: str, num_posts: int = 10) -> List[Dict]:
         """Получить посты пользователя с retry"""
+        logger.info(f"[FETCH POSTS] Starting fetch for @{username} (target: {num_posts} posts)")
         for attempt in range(MAX_FETCH_RETRIES):
             try:
+                logger.info(f"[FETCH ATTEMPT {attempt + 1}/{MAX_FETCH_RETRIES}] Getting user info for @{username}...")
                 user = self.client.user_info_by_username(username)
                 user_id = user.pk
+                logger.info(f"[FETCH ATTEMPT {attempt + 1}] Found user @{username} with ID {user_id}")
 
+                logger.info(f"[FETCH ATTEMPT {attempt + 1}] Fetching {num_posts} medias...")
                 medias = self.client.user_medias(user_id, amount=num_posts)
+                logger.info(f"[FETCH ATTEMPT {attempt + 1}] Got {len(list(medias))} medias from Instagram API")
 
                 posts = []
                 for media in medias:
@@ -137,15 +153,16 @@ class PostFetcher:
                     delay = random.uniform(self.min_delay, self.max_delay)
                     time.sleep(delay)
 
-                logger.info(f"Fetched {len(posts)} posts from {username}")
+                logger.info(f"[FETCH SUCCESS] Fetched {len(posts)} posts from @{username}")
                 return posts
 
             except Exception as e:
-                logger.warning(f"Error fetching posts from {username} on attempt {attempt + 1}: {e}")
+                logger.error(f"[FETCH ATTEMPT {attempt + 1}] Error fetching posts from @{username}: {type(e).__name__}: {e}")
                 if attempt < MAX_FETCH_RETRIES - 1:
+                    logger.info(f"[FETCH RETRY] Waiting {FETCH_RETRY_DELAY}s before retry...")
                     time.sleep(FETCH_RETRY_DELAY)
                 else:
-                    logger.error(f"Failed to fetch posts from {username} after {MAX_FETCH_RETRIES} attempts")
+                    logger.error(f"[FETCH FAILED] All {MAX_FETCH_RETRIES} attempts exhausted for @{username}")
                     return []
 
 
@@ -222,18 +239,26 @@ class Parser:
     def monitor_account(self, target_username: str, login_username: str, login_password: str, num_posts: int = 10) -> List[Dict]:
         """Полный цикл мониторинга аккаунта"""
         try:
+            logger.info(f"[PARSE START] target={target_username}, login_as={login_username}, num_posts={num_posts}")
+
             # Логин с основным аккаунтом (andreyfuture27) с сохранением сессии
+            logger.info(f"[LOGIN] Attempting login as {login_username}...")
             client = self.login_manager.login(login_username, login_password)
+            logger.info(f"[LOGIN OK] Successfully logged in as {login_username}")
 
             # Задержка между аккаунтами
             delay = random.uniform(self.min_account_delay, self.max_account_delay)
+            logger.info(f"[DELAY] Waiting {delay:.1f} seconds before fetching posts...")
             time.sleep(delay)
 
             # Получение постов из целевого аккаунта
+            logger.info(f"[FETCH] Getting {num_posts} posts from @{target_username}...")
             fetcher = PostFetcher(client)
             posts = fetcher.fetch_posts(target_username, num_posts)
+            logger.info(f"[FETCH OK] Got {len(posts)} posts from @{target_username}")
 
             if not posts:
+                logger.warning(f"[NO POSTS] No posts fetched from @{target_username}")
                 return []
 
             # Сохранение в БД
