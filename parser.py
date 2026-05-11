@@ -73,9 +73,8 @@ class LoginManager:
         # Retry логин
         for attempt in range(MAX_LOGIN_RETRIES):
             try:
-                # Создать новый клиент с ротацией User-Agent
-                user_agent = random.choice(self.USER_AGENTS)
-                client = Client(user_agent=user_agent)
+                # Создать новый клиент (instagrapi ротирует User-Agent внутри)
+                client = Client()
 
                 # Случайная задержка перед логином
                 delay = random.uniform(8, 20)

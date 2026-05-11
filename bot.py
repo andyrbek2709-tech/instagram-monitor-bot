@@ -603,7 +603,7 @@ class TelegramBot:
 
                     # Вызвать парсер
                     posts = self.parser.monitor_account(
-                        self.instagram_username,
+                        username,
                         self.instagram_password,
                         num_posts=num_posts
                     )
