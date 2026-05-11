@@ -134,6 +134,31 @@ class DatabaseInitializer:
             # Индекс для telegram_users
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_telegram_user_id ON telegram_users(user_id)')
 
+            # Таблица instagram_sessions — критично для персистентности логина
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS instagram_sessions (
+                    username TEXT PRIMARY KEY,
+                    settings_json TEXT,
+                    sessionid TEXT,
+                    is_valid BOOLEAN DEFAULT true,
+                    last_used TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL
+                )
+            ''')
+
+            # Таблица parse_logs — для дебага парсинга через Telegram
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS parse_logs (
+                    id SERIAL PRIMARY KEY,
+                    target_username TEXT,
+                    stage TEXT,
+                    level TEXT,
+                    message TEXT,
+                    created_at TIMESTAMP NOT NULL
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_parse_logs_created ON parse_logs(created_at DESC)')
+
             conn.commit()
             logger.info("Database tables created successfully")
 

@@ -15,6 +15,7 @@ import random
 logger = logging.getLogger(__name__)
 
 ADD_ACCOUNT, CONFIRM_ACCOUNT, SELECT_NUM_POSTS, SELECT_INTERVAL = range(4)
+WAIT_SESSIONID = 100
 
 
 class DigestFormatter:
@@ -661,35 +662,170 @@ class TelegramBot:
                         })
 
                 except Exception as e:
-                    logger.error(f"Error parsing {username}: {e}")
+                    error_msg = f"{type(e).__name__}: {str(e)}"
+                    logger.error(f"Error parsing {username}: {error_msg}", exc_info=True)
                     results.append({
                         'username': username,
                         'posts_parsed': 0,
-                        'status': f'❌ {str(e)[:30]}'
+                        'status': '❌',
+                        'error': error_msg
                     })
 
             # Показать результаты
-            result_text = f"✅ *Парсинг завершен!*\n\n"
+            has_errors = any(r.get('error') for r in results)
+            if total_posts > 0 and not has_errors:
+                result_text = f"✅ *Парсинг завершен!*\n\n"
+            elif total_posts > 0:
+                result_text = f"⚠️ *Парсинг завершен с ошибками*\n\n"
+            else:
+                result_text = f"❌ *Парсинг не получил постов*\n\n"
+
             result_text += f"📊 Всего постов спарсено: {total_posts}\n\n"
             result_text += "*По аккаунтам:*\n"
             for result in results:
-                result_text += f"{result['status']} @{result['username']} ({result['posts_parsed']} постов)\n"
+                result_text += f"{result['status']} @{result['username']} — {result['posts_parsed']} постов\n"
+                if result.get('error'):
+                    err = result['error'][:300]
+                    result_text += f"   `{err}`\n"
+
+            if has_errors or total_posts == 0:
+                result_text += "\n💡 Нажми */debug* для подробных логов\n"
+                result_text += "💡 Если Instagram блокирует логин — нажми */sessionid* и установи sessionid из браузера"
 
             keyboard = [
+                [InlineKeyboardButton("🔍 Подробные логи", callback_data='debug_logs')],
+                [InlineKeyboardButton("🔑 Установить sessionid", callback_data='set_sessionid')],
                 [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
                 [InlineKeyboardButton("🔙 Назад в меню", callback_data='back')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await query.edit_message_text(
-                result_text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+            # Markdown может сломаться на спецсимволах в ошибке — подстраховываемся
+            try:
+                await query.edit_message_text(result_text, reply_markup=reply_markup, parse_mode='Markdown')
+            except Exception:
+                await query.edit_message_text(result_text, reply_markup=reply_markup)
 
         except Exception as e:
             logger.error(f"Error in start_parsing: {e}", exc_info=True)
-            await query.edit_message_text(f"❌ Ошибка при запуске парсинга: {str(e)}")
+            await query.edit_message_text(
+                f"❌ Критическая ошибка парсинга:\n\n{type(e).__name__}: {str(e)[:500]}\n\n"
+                f"Нажми /debug для логов."
+            )
+
+    async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Показать последние логи парсинга из БД"""
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT target_username, stage, level, message, created_at
+                FROM parse_logs
+                ORDER BY created_at DESC
+                LIMIT 25
+            ''')
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+
+            if not rows:
+                text = "📭 Логов парсинга пока нет.\n\nЗапустите парсинг чтобы увидеть подробности."
+            else:
+                lines = ["🔍 Последние логи парсинга:\n"]
+                for target, stage, level, message, created_at in reversed(rows):
+                    icon = {'INFO': 'ℹ️', 'SUCCESS': '✅', 'WARN': '⚠️', 'ERROR': '❌'}.get(level, '•')
+                    time_str = created_at.strftime('%H:%M:%S') if hasattr(created_at, 'strftime') else str(created_at)[11:19]
+                    msg_short = (message[:200] + '...') if len(message) > 200 else message
+                    lines.append(f"{icon} [{time_str}] {stage} @{target}\n   {msg_short}")
+                text = "\n\n".join(lines)
+                if len(text) > 4000:
+                    text = text[-4000:]
+
+            if update.callback_query:
+                query = update.callback_query
+                await query.answer()
+                try:
+                    await query.edit_message_text(text)
+                except Exception:
+                    await update.effective_chat.send_message(text)
+            else:
+                await update.message.reply_text(text)
+
+        except Exception as e:
+            logger.error(f"Error in debug_command: {e}", exc_info=True)
+            err_text = f"❌ Ошибка получения логов: {type(e).__name__}: {e}"
+            if update.callback_query:
+                await update.callback_query.edit_message_text(err_text)
+            else:
+                await update.message.reply_text(err_text)
+
+    async def set_sessionid_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Начать процесс установки sessionid"""
+        instructions = (
+            "🔑 *Установка sessionid Instagram*\n\n"
+            "Это самый надёжный способ обойти блокировку Instagram на хостинге.\n\n"
+            "*Как получить sessionid:*\n"
+            "1. Открой Instagram в браузере и залогинься\n"
+            "2. F12 → вкладка *Application* → *Cookies* → `https://www.instagram.com`\n"
+            "3. Найди cookie с именем *sessionid*\n"
+            "4. Скопируй значение (длинная строка)\n"
+            "5. Пришли его сюда следующим сообщением\n\n"
+            f"⚠️ sessionid привяжется к аккаунту: *{self.instagram_username}*\n"
+            f"⚠️ Важно: ты должен быть залогинен в браузере именно под этим аккаунтом!\n\n"
+            "Отправь /cancel чтобы отменить."
+        )
+
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
+            await query.edit_message_text(instructions, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(instructions, parse_mode='Markdown')
+
+        return WAIT_SESSIONID
+
+    async def set_sessionid_save(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Сохранить sessionid в БД"""
+        sessionid = update.message.text.strip()
+
+        # Удалить сообщение с sessionid из чата (приватные данные)
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        if len(sessionid) < 20 or ' ' in sessionid or '\n' in sessionid:
+            await update.effective_chat.send_message(
+                "❌ sessionid выглядит некорректно. Должна быть длинная строка без пробелов.\n"
+                "Попробуй ещё раз через /sessionid"
+            )
+            return ConversationHandler.END
+
+        try:
+            if self.parser:
+                ok = self.parser.login_manager.save_sessionid(self.instagram_username, sessionid)
+            else:
+                ok = False
+
+            if ok:
+                await update.effective_chat.send_message(
+                    f"✅ sessionid сохранён для @{self.instagram_username}\n\n"
+                    "Теперь нажми /start → 'Начать парсинг' для проверки."
+                )
+            else:
+                await update.effective_chat.send_message(
+                    "❌ Не удалось сохранить sessionid. Посмотри /debug"
+                )
+        except Exception as e:
+            logger.error(f"Error saving sessionid: {e}", exc_info=True)
+            await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {e}")
+
+        return ConversationHandler.END
+
+    async def cancel_conversation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Отменить текущий диалог"""
+        await update.message.reply_text("❌ Отменено.")
+        return ConversationHandler.END
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Справка - работает как прямая команда и как кнопка"""
@@ -775,6 +911,7 @@ class TelegramBot:
         # Обработчики команд
         self.application.add_handler(CommandHandler('start', self.start))
         self.application.add_handler(CommandHandler('help', self.help_command))
+        self.application.add_handler(CommandHandler('debug', self.debug_command))
 
         # Обработчик добавления аккаунта
         conv_handler = ConversationHandler(
@@ -784,9 +921,22 @@ class TelegramBot:
                 SELECT_NUM_POSTS: [CallbackQueryHandler(self.select_num_posts, pattern='^posts_(5|10|20)$')],
                 SELECT_INTERVAL: [CallbackQueryHandler(self.select_interval, pattern='^interval_(1|6|24)$')]
             },
-            fallbacks=[]
+            fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
         )
         self.application.add_handler(conv_handler)
+
+        # Обработчик установки sessionid
+        sessionid_conv = ConversationHandler(
+            entry_points=[
+                CommandHandler('sessionid', self.set_sessionid_start),
+                CallbackQueryHandler(self.set_sessionid_start, pattern='^set_sessionid$')
+            ],
+            states={
+                WAIT_SESSIONID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_sessionid_save)]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
+        )
+        self.application.add_handler(sessionid_conv)
 
         # Обработчики кнопок
         self.application.add_handler(
@@ -823,7 +973,7 @@ class TelegramBot:
             CallbackQueryHandler(self.back_to_menu, pattern='^back$')
         )
         self.application.add_handler(
-            CallbackQueryHandler(self.back_to_menu, pattern='^settings$')
+            CallbackQueryHandler(self.debug_command, pattern='^debug_logs$')
         )
 
         return self.application
