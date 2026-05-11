@@ -1,330 +1,81 @@
-# 📱 Instagram Monitor Bot
+# Instagram Monitor Bot
 
-Полностью реализованный Telegram-бот для мониторинга, анализа и управления Instagram-аккаунтами с использованием Claude AI и OpenAI.
+Telegram-бот для мониторинга и анализа постов Instagram через HikerAPI + Claude AI.
 
-## ✨ Возможности
+## Что умеет
 
-✅ **Автоматический мониторинг** постов Instagram  
-✅ **AI-анализ контента** (Claude + OpenAI)  
-✅ **Определение вирусного потенциала** и релевантности  
-✅ **Ежедневные дайджесты** с аналитикой  
-✅ **Статистика и отчёты** по постам  
-✅ **Пауза/возобновление** мониторинга  
-✅ **Retry-механизм** для всех API вызовов  
-✅ **Валидация аккаунтов** и проверка статуса  
-✅ **Очистка данных** и архивирование  
+- **Разбор поста по ссылке** — кидаешь ссылку на любой пост/Reel, бот показывает текст и делает анализ через Claude на русском языке
+- **Парсинг аккаунта** — добавляешь аккаунт, бот присылает каждый пост отдельным сообщением (текст + ссылка)
+- **Ежедневный дайджест** — автоматически в 09:00 статистика по всем постам за 24 часа
+- **Мониторинг по расписанию** — проверка новых постов с выбранным интервалом
 
-## 🏗️ Архитектура
+## Архитектура
 
 ```
-main.py (Orchestrator)
-├── parser.py (Instagram парсинг)
-├── filter.py (Классификация контента)
-├── analyzer.py (AI анализ через Claude)
-├── bot.py (Telegram интерфейс)
-├── db_init.py (Инициализация БД)
-├── validator.py (Проверка аккаунтов)
-└── maintenance.py (Обслуживание данных)
+main.py          — запуск и оркестрация
+bot.py           — Telegram интерфейс (все команды и кнопки)
+parser.py        — HikerAPIClient + Parser (получение постов)
+filter.py        — классификация контента через GPT (реклама/личное)
+analyzer.py      — анализ через Claude (sentiment, темы, релевантность)
+db_init.py       — создание таблиц PostgreSQL
+validator.py     — проверка стейла аккаунтов через БД
+maintenance.py   — очистка старых данных
 ```
 
-## 📋 Требования
-
-- Python 3.11+
-- Docker & Docker Compose (опционально)
-- Telegram Bot API Token
-- OpenAI API Key
-- Anthropic Claude API Key
-- Instagram аккаунт
-
-## 🚀 Быстрый старт (Railway)
-
-### 1. Подключите GitHub репозиторий
-
-1. Перейдите на [Railway.app](https://railway.app)
-2. Нажмите "New Project" → "Deploy from GitHub repo"
-3. Выберите `andyrbek2709-tech/instagram-monitor-bot`
-
-### 2. Настройте переменные окружения в Railway
-
-**Обязательные переменные:**
-
-| Переменная | Значение | Пример |
-|-----------|---------|--------|
-| `TELEGRAM_BOT_TOKEN` | Токен от BotFather | `123456:ABC-DEF1234...` |
-| `TELEGRAM_CHAT_ID` | Ваш ID в Telegram (не юзернейм!) | `12345678` |
-| `OPENAI_API_KEY` | API ключ от OpenAI | `sk-proj-xxx...` |
-| `CLAUDE_API_KEY` | API ключ от Anthropic | `sk-ant-v4-xxx...` |
-| `INSTAGRAM_USERNAME` | Instagram юзернейм | `my_instagram_account` |
-| `INSTAGRAM_PASSWORD` | Instagram пароль | `MySecurePassword123!` |
-
-**Где получить значения:**
-
-- **TELEGRAM_BOT_TOKEN**: 
-  1. Напишите @BotFather в Telegram
-  2. `/start` → `/newbot`
-  3. Введите имя и юзернейм бота
-  4. BotFather отправит токен
-
-- **TELEGRAM_CHAT_ID**:
-  1. Добавьте бота в группу или напишите ему
-  2. Выполните: `curl https://api.telegram.org/bot{TOKEN}/getUpdates`
-  3. Найдите `"chat":{"id":12345678}` — это ваш ID
-
-- **OPENAI_API_KEY**: https://platform.openai.com/api-keys
-
-- **CLAUDE_API_KEY**: https://console.anthropic.com/account/keys
-
-**Опциональные переменные:**
-
-```env
-DATABASE_PATH=/app/data/instagram_monitor.db
-LOG_LEVEL=INFO
-TIMEZONE=Europe/Moscow
-MIN_REQUEST_DELAY=8
-MAX_REQUEST_DELAY=20
-MIN_ACCOUNT_DELAY=30
-MAX_ACCOUNT_DELAY=90
-```
-
-### 3. Настройте Volume для персистентности
-
-В Railway добавьте Volume:
-- Mount path: `/app/data`
-- Это сохранит базу данных и логи между перезагрузками
-
-### 4. Запустите бота
-
-Railway автоматически запустит проект с помощью:
-```bash
-python main.py
-```
-
-## 📱 Команды Telegram
-
-- `/start` — главное меню
-- `/help` — справка
-- **➕ Добавить аккаунт** — добавить Instagram аккаунт в мониторинг
-- **📋 Мои аккаунты** — список отслеживаемых аккаунтов
-- **📊 Получить дайджест** — ежедневный дайджест за 24 часа
-- **📈 Статистика** — общая статистика по постам
-- **⏸️ Пауза / ▶️ Возобновить** — управление мониторингом
-- **⚙️ Настройки** — конфигурация бота
-
-## 🔧 Компоненты
-
-### Parser (`parser.py`)
-- Аутентификация в Instagram с сохранением сессий
-- Антидетекция (User-Agent ротация, случайные задержки)
-- Retry-механизм для надёжности
-- Загрузка медиа с дедубликацией
-
-### Filter (`filter.py`)
-- Классификация контента (реклама, приватные посты и т.д.)
-- Анализ engagement-rate
-- Детекция паттернов контента
-- Двухуровневая классификация (ключевые слова + GPT-4o-mini)
-
-### Analyzer (`analyzer.py`)
-- Sentiment-анализ через Claude Haiku
-- Извлечение ключевых тем и упоминаний брендов
-- Расчёт релевантности и вирусного потенциала
-- Генерация рекомендаций
-
-### Bot (`bot.py`)
-- Асинхронный Telegram интерфейс
-- AsyncIOScheduler для ежедневных дайджестов
-- Форматирование аналитических дайджестов
-- Управление настройками пользователя
-
-### Validator (`validator.py`)
-- Проверка существования аккаунтов
-- Валидация активности аккаунтов
-- Обнаружение "залежавшихся" аккаунтов
-- Массовая верификация аккаунтов
-
-### Maintenance (`maintenance.py`)
-- Очистка постов старше 90 дней
-- Архивирование старых статистик
-- Генерация ежедневных отчётов
-- Управление логами
-
-## 📊 Структура БД
-
-```
-monitored_accounts
-├── id
-├── username
-├── session_key
-├── last_fetch
-├── is_active
-└── created_at
-
-posts
-├── id
-├── account_id (FK)
-├── post_id
-├── url
-├── caption
-├── media_type
-├── content_hash (для дедубликации)
-└── fetched_at
-
-filter_results
-├── id
-├── post_id (FK)
-├── is_ad
-├── is_greeting
-├── is_personal
-├── engagement_rate
-├── text_length
-└── analyzed_at
-
-analyses
-├── id
-├── post_id (FK)
-├── sentiment
-├── key_topics (JSON)
-├── brand_mentions (JSON)
-├── audience_segment
-├── content_quality
-├── relevance_score
-├── viral_potential
-├── recommendations (JSON)
-└── analyzed_at
-
-telegram_users
-├── id
-├── user_id (UNIQUE)
-├── username
-├── monitored_accounts
-├── settings (JSON для pause/resume)
-└── created_at
-
-daily_stats
-├── id
-├── date (UNIQUE)
-├── total_posts
-├── avg_relevance
-├── high_relevance_count
-├── viral_count
-├── sentiment_positive/negative/neutral
-└── created_at
-```
-
-## 🔄 Pipeline цикла
-
-```
-1. Валидация окружения
-2. Инициализация компонентов
-3. Запуск бота и планировщика
-
-Каждый час:
-├── 0. Обслуживание данных
-│   ├── Очистка старых постов (>90 дней)
-│   ├── Архивирование старых статистик
-│   └── Генерация ежедневных отчётов
-├── 1. Парсинг (Instagram)
-├── 2. Фильтрация (OpenAI)
-├── 3. Анализ (Claude AI)
-└── 4. Сохранение в БД
-
-Каждый день в 09:00 (±15 минут):
-└── Отправка ежедневных дайджестов всем пользователям
-```
-
-## 🛡️ Надёжность
-
-### Retry-механизм
-- **Parser**: 3 попытки (задержка 2-3 сек)
-- **Filter**: 3 попытки (задержка 2 сек)
-- **Analyzer**: 3 попытки (задержка 2 сек)
-- **Login**: 3 попытки (задержка 5 сек)
-
-### Anti-detection
-- RotatedUser-Agent для каждого запроса
-- Случайные задержки между постами (8-20 сек)
-- Случайные задержки между аккаунтами (30-90 сек)
-- Сохранение сессий для переиспользования
-
-### Обработка ошибок
-- Graceful fallbacks для всех API
-- Логирование всех ошибок и попыток
-- Автоматическая деактивация неработающих аккаунтов
-- Валидация данных перед сохранением
-
-## 📈 Мониторинг
-
-Логи доступны в:
-- Railway Dashboard → Deployments → Logs
-- Локально: `logs/bot.log`
-
-Ключевые метрики отслеживаются в:
-- `daily_stats` таблица (ежедневно)
-- Telegram статистика команда
-
-## 🚨 Важно для Railway
-
-### Порты
-- Бот использует только Telegram API (outbound)
-- Портов не требуется
-
-### Ресурсы
-- RAM: минимум 256 MB
-- CPU: 0.5 vCPU достаточно
-- Хранилище: 500 MB для БД и логов
-
-### Периодические задачи
-- Обслуживание БД: каждый час
-- Отправка дайджестов: каждый день в 09:00
-- Проверка аккаунтов: раз в неделю
-
-## 🔐 Безопасность
-
-- Все ключи хранятся в переменных окружения
-- `.env` файлы в `.gitignore`
-- Пароли Instagram не сохраняются на диск
-- Все API ключи логируются только при ошибках
-
-## 📝 Развертывание локально
-
-```bash
-# Установка зависимостей
-pip install -r requirements.txt
-
-# Инициализация БД
-python db_init.py
-
-# Запуск бота
-python main.py
-```
-
-## 🐳 Docker
-
-```bash
-# Сборка
-docker-compose build
-
-# Запуск
-docker-compose up -d
-
-# Логи
-docker-compose logs -f
-```
-
-## 📞 Поддержка
-
-Если возникают проблемы:
-
-1. Проверьте логи: `docker-compose logs`
-2. Убедитесь, что все переменные окружения установлены
-3. Проверьте подключение к Instagram
-4. Проверьте API ключи OpenAI и Claude
-
-## 📄 Лицензия
-
-MIT License - видите `LICENSE` файл для деталей
-
----
-
-**Создано с помощью Claude AI**  
-Последнее обновление: май 2026
+## Стек
+
+| Компонент | Решение |
+|-----------|---------|
+| Instagram парсинг | HikerAPI (hikerapi.com) — без прямого логина |
+| AI анализ | Anthropic Claude (claude-haiku-4-5) |
+| Контент-фильтр | OpenAI GPT-4o-mini (опционально) |
+| БД | PostgreSQL (Railway Postgres) |
+| Хостинг | Railway.app |
+| Telegram | python-telegram-bot 20.x |
+
+## Переменные окружения (Railway)
+
+**Обязательные:**
+- `DATABASE_URL` — Railway Postgres выдаёт автоматически
+- `TELEGRAM_BOT_TOKEN` — от @BotFather
+- `HIKER_API_KEY` — от hikerapi.com (есть бесплатный триал $2)
+
+**Опциональные:**
+- `CLAUDE_API_KEY` — для AI-анализа постов по ссылке
+- `OPENAI_API_KEY` — для GPT-классификации контента
+
+## Деплой на Railway
+
+1. Fork этого репозитория
+2. Railway → New Project → Deploy from GitHub
+3. Добавить PostgreSQL: + New → Database → Add PostgreSQL
+4. Variables → добавить `TELEGRAM_BOT_TOKEN`, `HIKER_API_KEY`
+5. Deploy — Railway автоматически подхватит `Procfile`
+
+## База данных (таблицы)
+
+| Таблица | Назначение |
+|---------|-----------|
+| `monitored_accounts` | аккаунты на мониторинге |
+| `posts` | спарсенные посты |
+| `filter_results` | результаты GPT-классификации |
+| `analyses` | AI-анализ (sentiment, темы, релевантность) |
+| `daily_stats` | дневная статистика |
+| `telegram_users` | пользователи бота |
+| `instagram_sessions` | зарезервировано (не используется) |
+| `parse_logs` | логи парсинга (смотреть через /debug) |
+
+## Как пользоваться
+
+### Разбор одного поста
+1. `/start` → **🔗 Разобрать пост по ссылке**
+2. Отправить ссылку `https://www.instagram.com/p/...` или `/reel/...`
+3. Бот покажет текст и автоматически сделает разбор через Claude
+
+### Регулярный мониторинг
+1. `/start` → **➕ Добавить аккаунт** → ввести username
+2. Выбрать количество постов и интервал
+3. `/start` → **🚀 Начать парсинг** — получить посты сейчас
+
+### Диагностика
+- `/debug` или кнопка "Подробные логи" — последние 25 записей из `parse_logs`
