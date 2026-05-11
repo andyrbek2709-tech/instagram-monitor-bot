@@ -717,12 +717,10 @@ class TelegramBot:
                     result_text += f"   `{err}`\n"
 
             if has_errors or total_posts == 0:
-                result_text += "\n💡 Нажми */debug* для подробных логов\n"
-                result_text += "💡 Если Instagram блокирует логин — нажми */sessionid* и установи sessionid из браузера"
+                result_text += "\n💡 Нажми 'Подробные логи' для диагностики"
 
             keyboard = [
                 [InlineKeyboardButton("🔍 Подробные логи", callback_data='debug_logs')],
-                [InlineKeyboardButton("🔑 Установить sessionid", callback_data='set_sessionid')],
                 [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
                 [InlineKeyboardButton("🔙 Назад в меню", callback_data='back')]
             ]
@@ -829,24 +827,10 @@ class TelegramBot:
             )
             return ConversationHandler.END
 
-        try:
-            if self.parser:
-                ok = self.parser.login_manager.save_sessionid(self.instagram_username, sessionid)
-            else:
-                ok = False
-
-            if ok:
-                await update.effective_chat.send_message(
-                    f"✅ sessionid сохранён для @{self.instagram_username}\n\n"
-                    "Теперь нажми /start → 'Начать парсинг' для проверки."
-                )
-            else:
-                await update.effective_chat.send_message(
-                    "❌ Не удалось сохранить sessionid. Посмотри /debug"
-                )
-        except Exception as e:
-            logger.error(f"Error saving sessionid: {e}", exc_info=True)
-            await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {e}")
+        await update.effective_chat.send_message(
+            "ℹ️ sessionid больше не нужен — бот использует HikerAPI и не логинится в Instagram напрямую.\n\n"
+            "Нажми /start → 'Начать парсинг'."
+        )
 
         return ConversationHandler.END
 

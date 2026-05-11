@@ -60,10 +60,7 @@ class InstagramMonitorBotPipeline:
         required_env_vars = [
             'DATABASE_URL',
             'TELEGRAM_BOT_TOKEN',
-            'OPENAI_API_KEY',
-            'CLAUDE_API_KEY',
-            'INSTAGRAM_USERNAME',
-            'INSTAGRAM_PASSWORD'
+            'HIKER_API_KEY',
         ]
 
         missing = []
@@ -75,7 +72,13 @@ class InstagramMonitorBotPipeline:
             logger.error(f"Missing environment variables: {', '.join(missing)}")
             return False
 
-        logger.info("All environment variables validated")
+        # Опциональные ключи — предупреждение, но не блокировка
+        optional_vars = ['CLAUDE_API_KEY', 'OPENAI_API_KEY']
+        for var in optional_vars:
+            if not os.getenv(var):
+                logger.warning(f"Optional env var not set: {var} (some analysis features will be degraded)")
+
+        logger.info("Environment variables validated")
         return True
 
     def ensure_directories(self) -> None:

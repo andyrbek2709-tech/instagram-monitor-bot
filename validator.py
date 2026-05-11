@@ -1,46 +1,16 @@
 import psycopg2
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from datetime import datetime, timedelta
-from instagrapi import Client
-from instagrapi.exceptions import LoginRequired, UserNotFound
 
 logger = logging.getLogger(__name__)
 
 
 class AccountValidator:
-    """Валидация и проверка статуса Instagram аккаунтов"""
+    """Валидация аккаунтов через БД (HikerAPI не требует прямого логина)"""
 
     def __init__(self, db_url: str):
         self.db_url = db_url
-
-    def validate_account_exists(self, client: Client, username: str) -> Tuple[bool, str]:
-        """Проверить существование аккаунта"""
-        try:
-            user = client.user_info_by_username(username)
-            logger.info(f"Account {username} validated successfully (ID: {user.pk})")
-            return True, f"Account found: {user.full_name or username}"
-        except UserNotFound:
-            logger.warning(f"Account {username} not found")
-            return False, f"Account @{username} not found on Instagram"
-        except Exception as e:
-            logger.error(f"Error validating account {username}: {e}")
-            return False, f"Error validating account: {str(e)}"
-
-    def validate_account_is_active(self, client: Client, username: str) -> Tuple[bool, str]:
-        """Проверить активность аккаунта (может быть заблокирован)"""
-        try:
-            user = client.user_info_by_username(username)
-
-            # Проверить есть ли недавние посты
-            medias = client.user_medias(user.pk, amount=1)
-            if not medias:
-                return False, "Account has no posts"
-
-            return True, "Account is active"
-        except Exception as e:
-            logger.error(f"Error checking account activity {username}: {e}")
-            return False, f"Account may be restricted: {str(e)}"
 
     def mark_account_invalid(self, username: str) -> bool:
         """Отметить аккаунт как неактивный"""
@@ -94,42 +64,3 @@ class AccountValidator:
         except Exception as e:
             logger.error(f"Error checking stale accounts: {e}")
             return []
-
-    def verify_all_accounts(self, client: Client) -> Dict[str, List[str]]:
-        """Проверить все активные аккаунты"""
-        try:
-            conn = psycopg2.connect(self.db_url)
-            cursor = conn.cursor()
-
-            cursor.execute(
-                'SELECT username FROM monitored_accounts WHERE is_active = 1'
-            )
-            usernames = [row[0] for row in cursor.fetchall()]
-            cursor.close()
-            conn.close()
-
-            valid_accounts = []
-            invalid_accounts = []
-
-            for username in usernames:
-                is_valid, msg = self.validate_account_exists(client, username)
-                if is_valid:
-                    is_active, activity_msg = self.validate_account_is_active(client, username)
-                    if is_active:
-                        valid_accounts.append(username)
-                    else:
-                        invalid_accounts.append(username)
-                        self.mark_account_invalid(username)
-                else:
-                    invalid_accounts.append(username)
-                    self.mark_account_invalid(username)
-
-            logger.info(f"Account verification: {len(valid_accounts)} valid, {len(invalid_accounts)} invalid")
-            return {
-                'valid': valid_accounts,
-                'invalid': invalid_accounts
-            }
-
-        except Exception as e:
-            logger.error(f"Error verifying accounts: {e}")
-            return {'valid': [], 'invalid': []}
