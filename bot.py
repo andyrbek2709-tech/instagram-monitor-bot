@@ -1000,12 +1000,64 @@ class TelegramBot:
                         }],
                         max_tokens=600
                     )
-                    caption = vision_resp.choices[0].message.content.strip()
-                    logger.info(f"GPT-4o Vision description: {caption[:100]}...")
-                    await update.effective_chat.send_message(
-                        f"👁 *GPT-4o видит:*\n\n{caption}",
-                        parse_mode='Markdown'
-                    )
+                    visual_desc = vision_resp.choices[0].message.content.strip()
+                    logger.info(f"GPT-4o Vision description: {visual_desc[:100]}...")
+                    try:
+                        await update.effective_chat.send_message(
+                            f"👁 *GPT-4o видит:*\n\n{visual_desc}",
+                            parse_mode='Markdown'
+                        )
+                    except Exception:
+                        await update.effective_chat.send_message(f"GPT-4o видит:\n\n{visual_desc}")
+
+                    # Whisper: транскрипция речи из видео
+                    transcript_text = ''
+                    video_url = post.get('video_url')
+                    if video_url:
+                        await update.effective_chat.send_message("🎤 Слушаю что говорят в видео (Whisper)...")
+                        try:
+                            import io
+                            ig_headers = {
+                                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                                'Referer': 'https://www.instagram.com/',
+                            }
+                            # Проверить размер файла перед скачиванием
+                            head = _req.head(video_url, headers=ig_headers, timeout=10)
+                            size = int(head.headers.get('content-length', 0))
+                            if 0 < size <= 24 * 1024 * 1024:  # не больше 24 МБ (лимит Whisper 25 МБ)
+                                vid_data = _req.get(video_url, headers=ig_headers, timeout=60)
+                                vid_data.raise_for_status()
+                                audio_buf = io.BytesIO(vid_data.content)
+                                audio_buf.name = "video.mp4"
+                                transcript = oa_client.audio.transcriptions.create(
+                                    model="whisper-1",
+                                    file=audio_buf
+                                )
+                                transcript_text = transcript.text.strip()
+                                if transcript_text:
+                                    try:
+                                        await update.effective_chat.send_message(
+                                            f"🎤 *Речь в видео:*\n\n{transcript_text}",
+                                            parse_mode='Markdown'
+                                        )
+                                    except Exception:
+                                        await update.effective_chat.send_message(f"Речь в видео:\n\n{transcript_text}")
+                                else:
+                                    await update.effective_chat.send_message("🔇 Речи в видео не обнаружено")
+                            else:
+                                await update.effective_chat.send_message(
+                                    f"⚠️ Видео слишком большое ({size // 1024 // 1024} МБ) — транскрипция пропущена"
+                                )
+                        except Exception as we:
+                            logger.warning(f"Whisper failed: {we}")
+                            await update.effective_chat.send_message(f"⚠️ Whisper не смог транскрибировать: {str(we)[:150]}")
+
+                    # Объединить визуальное описание + транскрипцию для Claude
+                    if transcript_text:
+                        caption = f"[Что видно в кадре]: {visual_desc}\n\n[Что говорит человек]: {transcript_text}"
+                    else:
+                        caption = visual_desc
+
                 except Exception as ve:
                     logger.error(f"GPT-4o Vision error: {ve}", exc_info=True)
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),

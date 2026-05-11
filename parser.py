@@ -109,7 +109,7 @@ class Parser:
         caption = self._parse_caption(caption_raw)
         user = media.get('user') or {}
 
-        # Извлечь URL превью/обложки для видео и изображений
+        # Извлечь URL превью/обложки
         thumbnail_url = None
         image_versions = media.get('image_versions2') or {}
         candidates = image_versions.get('candidates') or []
@@ -122,6 +122,15 @@ class Parser:
                 or media.get('cover_frame_url')
             )
 
+        # Извлечь URL видео (для Reels / видео-постов)
+        video_url = None
+        if media.get('media_type') == 2:
+            video_versions = media.get('video_versions') or []
+            if video_versions:
+                video_url = video_versions[0].get('url')
+            if not video_url:
+                video_url = media.get('video_url')
+
         return {
             'post_id': str(media.get('pk') or media.get('id') or ''),
             'url': url,
@@ -132,6 +141,7 @@ class Parser:
             'code': code,
             'account': user.get('username', ''),
             'thumbnail_url': thumbnail_url,
+            'video_url': video_url,
         }
 
     def _parse_caption(self, caption_data) -> str:
