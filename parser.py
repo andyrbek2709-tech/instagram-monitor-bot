@@ -109,6 +109,19 @@ class Parser:
         caption = self._parse_caption(caption_raw)
         user = media.get('user') or {}
 
+        # Извлечь URL превью/обложки для видео и изображений
+        thumbnail_url = None
+        image_versions = media.get('image_versions2') or {}
+        candidates = image_versions.get('candidates') or []
+        if candidates:
+            thumbnail_url = candidates[0].get('url')
+        if not thumbnail_url:
+            thumbnail_url = (
+                media.get('thumbnail_url')
+                or media.get('display_url')
+                or media.get('cover_frame_url')
+            )
+
         return {
             'post_id': str(media.get('pk') or media.get('id') or ''),
             'url': url,
@@ -118,6 +131,7 @@ class Parser:
             'comments': media.get('comment_count', 0) or 0,
             'code': code,
             'account': user.get('username', ''),
+            'thumbnail_url': thumbnail_url,
         }
 
     def _parse_caption(self, caption_data) -> str:
