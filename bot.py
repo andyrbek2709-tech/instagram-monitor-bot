@@ -966,14 +966,31 @@ class TelegramBot:
                 await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через GPT-4o Vision...")
 
                 try:
+                    import base64
+                    import requests as _req
                     from openai import OpenAI as _OpenAI
+
+                    # Скачать превью сами — Instagram CDN не отдаёт напрямую OpenAI
+                    img_resp = _req.get(
+                        thumbnail_url,
+                        headers={
+                            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                            'Referer': 'https://www.instagram.com/',
+                        },
+                        timeout=20
+                    )
+                    img_resp.raise_for_status()
+                    content_type = img_resp.headers.get('content-type', 'image/jpeg').split(';')[0]
+                    img_b64 = base64.b64encode(img_resp.content).decode('utf-8')
+                    img_data_uri = f"data:{content_type};base64,{img_b64}"
+
                     oa_client = _OpenAI(api_key=openai_key)
                     vision_resp = oa_client.chat.completions.create(
                         model="gpt-4o",
                         messages=[{
                             "role": "user",
                             "content": [
-                                {"type": "image_url", "image_url": {"url": thumbnail_url}},
+                                {"type": "image_url", "image_url": {"url": img_data_uri}},
                                 {"type": "text", "text": (
                                     "Это превью видео/Reel из Instagram. "
                                     "Подробно опиши: что показано, кто в кадре, тема, настроение, "
