@@ -566,7 +566,7 @@ class TelegramBot:
 
                 # Получить все активные аккаунты пользователя
                 cursor.execute('''
-                    SELECT id, username, num_posts, min_likes
+                    SELECT id, username, num_posts, min_likes, check_interval_hours
                     FROM monitored_accounts
                     WHERE (user_id = ? OR user_id IS NULL) AND is_active = 1
                 ''', (user_id,))
@@ -589,7 +589,7 @@ class TelegramBot:
             results = []
             total_posts = 0
 
-            for acc_id, username, num_posts, min_likes in accounts:
+            for acc_id, username, num_posts, min_likes, check_interval_hours in accounts:
                 try:
                     logger.info(f"Parsing {username} ({num_posts} posts, min_likes={min_likes})...")
 
@@ -627,11 +627,7 @@ class TelegramBot:
                         # Обновить время последней проверки
                         with sqlite3.connect(self.db_path) as conn:
                             cursor = conn.cursor()
-                            next_check = datetime.utcnow() + timedelta(
-                                hours=accounts[accounts.index((acc_id, username, num_posts, min_likes))][3]
-                                if accounts.index((acc_id, username, num_posts, min_likes)) < len(accounts)
-                                else 24
-                            )
+                            next_check = datetime.utcnow() + timedelta(hours=check_interval_hours)
                             cursor.execute(
                                 'UPDATE monitored_accounts SET last_fetch = ?, next_check = ? WHERE id = ?',
                                 (datetime.utcnow().isoformat(), next_check.isoformat(), acc_id)
