@@ -105,7 +105,13 @@ class InstagramMonitorBotPipeline:
             self.parser = Parser(self.db_path)
             self.filter = Filter(self.db_path, os.getenv('OPENAI_API_KEY'))
             self.analyzer = Analyzer(self.db_path, os.getenv('CLAUDE_API_KEY'))
-            self.telegram_bot = TelegramBot(os.getenv('TELEGRAM_BOT_TOKEN'), self.db_path)
+            self.telegram_bot = TelegramBot(
+                os.getenv('TELEGRAM_BOT_TOKEN'),
+                self.db_path,
+                parser=self.parser,
+                filter_obj=self.filter,
+                analyzer=self.analyzer
+            )
             self.maintenance = DataMaintenance(self.db_path)
             self.validator = AccountValidator(self.db_path)
 

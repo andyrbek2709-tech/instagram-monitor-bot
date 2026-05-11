@@ -14,7 +14,7 @@ import random
 
 logger = logging.getLogger(__name__)
 
-ADD_ACCOUNT, CONFIRM_ACCOUNT = range(2)
+ADD_ACCOUNT, CONFIRM_ACCOUNT, SELECT_NUM_POSTS, SELECT_INTERVAL = range(4)
 
 
 class DigestFormatter:
@@ -94,14 +94,20 @@ class DigestFormatter:
 class TelegramBot:
     """Telegram бот с обработчиками команд"""
 
-    def __init__(self, token: str, db_path: str):
+    def __init__(self, token: str, db_path: str, parser=None, filter_obj=None, analyzer=None):
         self.token = token
         self.db_path = db_path
         self.application = None
+        self.parser = parser
+        self.filter = filter_obj
+        self.analyzer = analyzer
+        self.instagram_username = os.getenv('INSTAGRAM_USERNAME')
+        self.instagram_password = os.getenv('INSTAGRAM_PASSWORD')
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик /start"""
         keyboard = [
+            [InlineKeyboardButton("🚀 Начать парсинг", callback_data='start_parsing')],
             [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
             [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
             [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
@@ -131,32 +137,105 @@ class TelegramBot:
         return ADD_ACCOUNT
 
     async def confirm_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Подтвердить добавление аккаунта"""
+        """Подтвердить имя аккаунта и выбрать количество постов"""
         username = update.message.text.strip()
+        context.user_data['account_username'] = username
+        context.user_data['user_id'] = update.message.from_user.id
 
-        # Сохранить в БД
+        keyboard = [
+            [InlineKeyboardButton("5 постов (быстро)", callback_data='posts_5')],
+            [InlineKeyboardButton("10 постов (стандарт)", callback_data='posts_10')],
+            [InlineKeyboardButton("20 постов (много)", callback_data='posts_20')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            f"📱 Аккаунт *@{username}*\n\n"
+            "Сколько последних постов парсить?",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+        return SELECT_NUM_POSTS
+
+    async def select_num_posts(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Выбрать количество постов"""
+        query = update.callback_query
+        await query.answer()
+
+        num_posts_map = {
+            'posts_5': 5,
+            'posts_10': 10,
+            'posts_20': 20
+        }
+
+        num_posts = num_posts_map.get(query.data, 10)
+        context.user_data['num_posts'] = num_posts
+
+        keyboard = [
+            [InlineKeyboardButton("⏰ Каждый день", callback_data='interval_24')],
+            [InlineKeyboardButton("🔔 Каждые 6 часов", callback_data='interval_6')],
+            [InlineKeyboardButton("⚡ Каждый час", callback_data='interval_1')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"⏱️ Как часто проверять?\n\n"
+            f"_(Выбрано: {num_posts} постов)_",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+        return SELECT_INTERVAL
+
+    async def select_interval(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Выбрать интервал проверки"""
+        query = update.callback_query
+        await query.answer()
+
+        interval_map = {
+            'interval_1': 1,
+            'interval_6': 6,
+            'interval_24': 24
+        }
+
+        interval_hours = interval_map.get(query.data, 24)
+        username = context.user_data.get('account_username')
+        num_posts = context.user_data.get('num_posts', 10)
+        user_id = context.user_data.get('user_id')
+
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
+                next_check = datetime.utcnow() + timedelta(hours=interval_hours)
+
                 cursor.execute(
-                    'INSERT OR IGNORE INTO monitored_accounts (username, session_key, created_at) VALUES (?, ?, ?)',
-                    (username, '', datetime.utcnow().isoformat())
+                    '''INSERT OR IGNORE INTO monitored_accounts
+                       (user_id, username, num_posts, check_interval_hours, next_check, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)''',
+                    (user_id, username, num_posts, interval_hours, next_check.isoformat(),
+                     datetime.utcnow().isoformat())
                 )
 
-                # Добавить пользователя Telegram
                 cursor.execute(
                     'INSERT OR IGNORE INTO telegram_users (user_id, username, created_at) VALUES (?, ?, ?)',
-                    (update.message.from_user.id, update.message.from_user.username or 'unknown',
-                     datetime.utcnow().isoformat())
+                    (user_id, update.effective_user.username or 'unknown', datetime.utcnow().isoformat())
                 )
                 conn.commit()
 
-            await update.message.reply_text(
-                f"✅ Аккаунт @{username} добавлен для мониторинга!"
+            interval_text = {1: "каждый час", 6: "каждые 6 часов", 24: "каждый день"}.get(interval_hours)
+            await query.edit_message_text(
+                f"✅ *Аккаунт добавлен!*\n\n"
+                f"@{username}\n"
+                f"📊 Постов: {num_posts}\n"
+                f"⏱️ Интервал: {interval_text}",
+                parse_mode='Markdown'
             )
+            logger.info(f"Account added: {username} ({num_posts} posts, {interval_hours}h interval)")
+
         except Exception as e:
             logger.error(f"Error adding account: {e}")
-            await update.message.reply_text("❌ Ошибка при добавлении аккаунта")
+            await query.edit_message_text("❌ Ошибка при добавлении аккаунта")
 
         return ConversationHandler.END
 
@@ -367,38 +446,240 @@ class TelegramBot:
             user_id = update.effective_user.id
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                settings = json.dumps({"paused": True})
+                settings = json.dumps({"paused": True, "paused_at": datetime.utcnow().isoformat()})
                 cursor.execute(
                     'UPDATE telegram_users SET settings = ? WHERE user_id = ?',
                     (settings, user_id)
                 )
                 conn.commit()
 
-            await query.edit_message_text("⏸️ Мониторинг приостановлен")
+            keyboard = [
+                [InlineKeyboardButton("▶️ Возобновить", callback_data='resume')],
+                [InlineKeyboardButton("🔙 Назад в меню", callback_data='back')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                "⏸️ *Мониторинг приостановлен*\n\n"
+                "Все проверки остановлены.\n"
+                "Возобновите в любой момент.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
         except Exception as e:
             logger.error(f"Error pausing monitoring: {e}")
             await query.edit_message_text("❌ Ошибка при приостановке")
 
     async def resume_monitoring(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Возобновить мониторинг"""
+        """Возобновить мониторинг с показом активных аккаунтов"""
         query = update.callback_query
         await query.answer()
 
         try:
             user_id = update.effective_user.id
+
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                settings = json.dumps({"paused": False})
+
+                # Получить активные аккаунты этого пользователя
+                cursor.execute('''
+                    SELECT id, username, last_fetch, is_active
+                    FROM monitored_accounts
+                    WHERE user_id = ? OR (user_id IS NULL)
+                    ORDER BY is_active DESC, last_fetch DESC
+                ''', (user_id,))
+                accounts = cursor.fetchall()
+
+                # Возобновить мониторинг
+                settings = json.dumps({"paused": False, "resumed_at": datetime.utcnow().isoformat()})
                 cursor.execute(
                     'UPDATE telegram_users SET settings = ? WHERE user_id = ?',
                     (settings, user_id)
                 )
                 conn.commit()
 
-            await query.edit_message_text("▶️ Мониторинг возобновлен")
+            # Построить список активных аккаунтов
+            if accounts:
+                text = "▶️ *Мониторинг возобновлен*\n\n"
+                text += "*Отслеживаемые аккаунты:*\n\n"
+
+                active_count = 0
+                for acc_id, username, last_fetch, is_active in accounts:
+                    if is_active:
+                        icon = "🟢"
+                        active_count += 1
+
+                        # Форматировать время
+                        if last_fetch:
+                            last_fetch_dt = datetime.fromisoformat(last_fetch)
+                            hours_ago = (datetime.utcnow() - last_fetch_dt).total_seconds() / 3600
+                            if hours_ago < 1:
+                                time_str = "только что"
+                            elif hours_ago < 24:
+                                time_str = f"{int(hours_ago)}ч назад"
+                            else:
+                                days_ago = int(hours_ago / 24)
+                                time_str = f"{days_ago}д назад"
+                        else:
+                            time_str = "в очереди"
+
+                        text += f"{icon} *@{username}*\n   └─ Проверка: {time_str}\n"
+
+                if active_count == 0:
+                    text += "_(нет активных аккаунтов)_\n"
+
+                text += f"\n✅ Всего аккаунтов в мониторинге: {len(accounts)}"
+            else:
+                text = "▶️ *Мониторинг возобновлен*\n\n_(Аккаунты не добавлены)_"
+
+            keyboard = [
+                [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
+                [InlineKeyboardButton("🔙 Назад в меню", callback_data='back')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
         except Exception as e:
             logger.error(f"Error resuming monitoring: {e}")
             await query.edit_message_text("❌ Ошибка при возобновлении")
+
+    async def start_parsing(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Начать парсинг вручную"""
+        query = update.callback_query
+        await query.answer()
+
+        try:
+            await query.edit_message_text(
+                "⏳ *Парсинг запущен...*\n\n"
+                "Это может занять несколько минут.\n"
+                "Вы получите уведомление когда процесс завершится.",
+                parse_mode='Markdown'
+            )
+
+            user_id = update.effective_user.id
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # Получить все активные аккаунты пользователя
+                cursor.execute('''
+                    SELECT id, username, num_posts, min_likes
+                    FROM monitored_accounts
+                    WHERE (user_id = ? OR user_id IS NULL) AND is_active = 1
+                ''', (user_id,))
+                accounts = cursor.fetchall()
+
+            if not accounts:
+                await query.edit_message_text(
+                    "❌ Нет активных аккаунтов для парсинга.\n\n"
+                    "Добавьте аккаунт чтобы начать мониторинг."
+                )
+                return
+
+            if not self.parser or not self.filter or not self.analyzer:
+                await query.edit_message_text(
+                    "❌ Ошибка: парсер не инициализирован.\n\n"
+                    "Пожалуйста, перезагрузите бота."
+                )
+                return
+
+            results = []
+            total_posts = 0
+
+            for acc_id, username, num_posts, min_likes in accounts:
+                try:
+                    logger.info(f"Parsing {username} ({num_posts} posts, min_likes={min_likes})...")
+
+                    await query.edit_message_text(
+                        f"⏳ *Парсинг в процессе...*\n\n"
+                        f"📱 Обработка: @{username}\n"
+                        f"📊 Постов к парсингу: {num_posts}\n\n"
+                        f"⏱️ Это займет ~{num_posts * 15}сек...",
+                        parse_mode='Markdown'
+                    )
+
+                    # Вызвать парсер
+                    posts = self.parser.monitor_account(
+                        self.instagram_username,
+                        self.instagram_password,
+                        num_posts=num_posts
+                    )
+
+                    if posts:
+                        # Профильтровать посты
+                        filtered = self.filter.process_posts(posts)
+
+                        # Обогатить посты данными
+                        for i, post in enumerate(posts):
+                            if i < len(filtered):
+                                post.update({
+                                    'engagement_rate': filtered[i].get('engagement_rate', 0),
+                                    'text_length': filtered[i].get('text_length', 0)
+                                })
+
+                        # Анализировать посты
+                        analyses = self.analyzer.process_posts(posts)
+
+                        # Обновить время последней проверки
+                        with sqlite3.connect(self.db_path) as conn:
+                            cursor = conn.cursor()
+                            next_check = datetime.utcnow() + timedelta(
+                                hours=accounts[accounts.index((acc_id, username, num_posts, min_likes))][3]
+                                if accounts.index((acc_id, username, num_posts, min_likes)) < len(accounts)
+                                else 24
+                            )
+                            cursor.execute(
+                                'UPDATE monitored_accounts SET last_fetch = ?, next_check = ? WHERE id = ?',
+                                (datetime.utcnow().isoformat(), next_check.isoformat(), acc_id)
+                            )
+                            conn.commit()
+
+                        total_posts += len(posts)
+                        results.append({
+                            'username': username,
+                            'posts_parsed': len(posts),
+                            'status': '✅'
+                        })
+                    else:
+                        results.append({
+                            'username': username,
+                            'posts_parsed': 0,
+                            'status': '⚠️ Нет новых постов'
+                        })
+
+                except Exception as e:
+                    logger.error(f"Error parsing {username}: {e}")
+                    results.append({
+                        'username': username,
+                        'posts_parsed': 0,
+                        'status': f'❌ {str(e)[:30]}'
+                    })
+
+            # Показать результаты
+            result_text = f"✅ *Парсинг завершен!*\n\n"
+            result_text += f"📊 Всего постов спарсено: {total_posts}\n\n"
+            result_text += "*По аккаунтам:*\n"
+            for result in results:
+                result_text += f"{result['status']} @{result['username']} ({result['posts_parsed']} постов)\n"
+
+            keyboard = [
+                [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
+                [InlineKeyboardButton("🔙 Назад в меню", callback_data='back')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                result_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+
+        except Exception as e:
+            logger.error(f"Error in start_parsing: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка при запуске парсинга: {str(e)}")
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Справка - работает как прямая команда и как кнопка"""
@@ -489,13 +770,18 @@ class TelegramBot:
         conv_handler = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.add_account, pattern='^add_account$')],
             states={
-                ADD_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_account)]
+                ADD_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_account)],
+                SELECT_NUM_POSTS: [CallbackQueryHandler(self.select_num_posts, pattern='^posts_(5|10|20)$')],
+                SELECT_INTERVAL: [CallbackQueryHandler(self.select_interval, pattern='^interval_(1|6|24)$')]
             },
             fallbacks=[]
         )
         self.application.add_handler(conv_handler)
 
         # Обработчики кнопок
+        self.application.add_handler(
+            CallbackQueryHandler(self.start_parsing, pattern='^start_parsing$')
+        )
         self.application.add_handler(
             CallbackQueryHandler(self.list_accounts, pattern='^list_accounts$')
         )

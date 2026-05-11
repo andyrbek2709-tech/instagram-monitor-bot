@@ -24,6 +24,39 @@ class DatabaseInitializer:
         conn.execute('PRAGMA foreign_keys = ON')
         return conn
 
+    def migrate_tables(self) -> None:
+        """Миграция существующих таблиц"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Добавить новые колонки если их нет
+            try:
+                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN user_id INTEGER')
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN num_posts INTEGER DEFAULT 10')
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN min_likes INTEGER DEFAULT 0')
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN check_interval_hours INTEGER DEFAULT 24')
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cursor.execute('ALTER TABLE monitored_accounts ADD COLUMN next_check TIMESTAMP')
+            except sqlite3.OperationalError:
+                pass
+
+            conn.commit()
+
     def create_tables(self) -> None:
         """Создать все необходимые таблицы"""
         with self.get_connection() as conn:
@@ -33,9 +66,14 @@ class DatabaseInitializer:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS monitored_accounts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
                     username TEXT UNIQUE NOT NULL,
                     session_key TEXT,
+                    num_posts INTEGER DEFAULT 10,
+                    min_likes INTEGER DEFAULT 0,
+                    check_interval_hours INTEGER DEFAULT 24,
                     last_fetch TIMESTAMP,
+                    next_check TIMESTAMP,
                     is_active INTEGER DEFAULT 1,
                     created_at TIMESTAMP NOT NULL
                 )
@@ -169,6 +207,7 @@ class DatabaseInitializer:
         try:
             self.ensure_database_dir()
             self.create_tables()
+            self.migrate_tables()
             success = self.verify_database()
 
             if success:
