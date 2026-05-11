@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 ADD_ACCOUNT, CONFIRM_ACCOUNT, SELECT_NUM_POSTS, SELECT_INTERVAL = range(4)
 WAIT_SESSIONID = 100
+WAIT_URL = 101
 
 
 class DigestFormatter:
@@ -110,12 +111,12 @@ class TelegramBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик /start"""
         keyboard = [
-            [InlineKeyboardButton("🚀 Начать парсинг", callback_data='start_parsing')],
+            [InlineKeyboardButton("🔗 Разобрать пост по ссылке", callback_data='analyze_url')],
+            [InlineKeyboardButton("🚀 Начать парсинг аккаунта", callback_data='start_parsing')],
             [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
             [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
             [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
             [InlineKeyboardButton("📈 Статистика", callback_data='stats')],
-            [InlineKeyboardButton("⏸️ Пауза / ▶️ Возобновить", callback_data='pause')],
             [InlineKeyboardButton("⚙️ Настройки", callback_data='settings')],
             [InlineKeyboardButton("❓ Справка", callback_data='help')]
         ]
@@ -406,11 +407,12 @@ class TelegramBot:
         await query.answer()
 
         keyboard = [
+            [InlineKeyboardButton("🔗 Разобрать пост по ссылке", callback_data='analyze_url')],
+            [InlineKeyboardButton("🚀 Начать парсинг аккаунта", callback_data='start_parsing')],
             [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
             [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
             [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
             [InlineKeyboardButton("📈 Статистика", callback_data='stats')],
-            [InlineKeyboardButton("⏸️ Пауза / ▶️ Возобновить", callback_data='pause')],
             [InlineKeyboardButton("⚙️ Настройки", callback_data='settings')],
             [InlineKeyboardButton("❓ Справка", callback_data='help')]
         ]
@@ -900,6 +902,119 @@ class TelegramBot:
         else:
             await update.message.reply_text(help_text, parse_mode='Markdown')
 
+    async def analyze_url_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Начать флоу анализа поста по ссылке"""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "🔗 *Разбор поста по ссылке*\n\n"
+            "Отправь ссылку на пост или Reel Instagram — я получу текст и сразу разберу его.\n\n"
+            "Пример: `https://www.instagram.com/p/ABC123/`\n\n"
+            "Отправь /cancel чтобы отменить.",
+            parse_mode='Markdown'
+        )
+        return WAIT_URL
+
+    async def analyze_url_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Получить ссылку, спарсить пост и автоматически разобрать через Claude"""
+        text = update.message.text.strip()
+        match = re.search(r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)', text)
+        if not match:
+            await update.message.reply_text(
+                "❌ Это не похоже на ссылку Instagram.\n\n"
+                "Нужна ссылка вида `https://www.instagram.com/p/...` или `/reel/...`\n\n"
+                "Попробуй ещё раз или /cancel",
+                parse_mode='Markdown'
+            )
+            return WAIT_URL
+
+        url = match.group(0)
+        status_msg = await update.message.reply_text("⏳ Получаю пост...")
+
+        try:
+            if not self.parser:
+                await status_msg.edit_text("❌ Парсер не инициализирован.")
+                return ConversationHandler.END
+
+            post = self.parser.get_post_by_url(url)
+            if not post:
+                await status_msg.edit_text(
+                    "❌ Не удалось получить пост.\n\n"
+                    "Возможные причины: закрытый аккаунт, удалённый пост или неверная ссылка."
+                )
+                return ConversationHandler.END
+
+            caption = post.get('caption', '') or ''
+            account = post.get('account', '')
+            likes = post.get('likes', 0)
+            comments = post.get('comments', 0)
+
+            # Показать сырой текст поста
+            cap_display = (caption[:800] + '…') if len(caption) > 800 else caption
+            raw_text = f"📌 *Пост{' @' + account if account else ''}*\n\n"
+            raw_text += cap_display if cap_display else '_(текст отсутствует — только медиа)_'
+            raw_text += f"\n\n❤️ {likes}  💬 {comments}  🔗 {url}"
+
+            try:
+                await status_msg.edit_text(raw_text, parse_mode='Markdown')
+            except Exception:
+                await status_msg.edit_text(f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{url}")
+
+            if not caption:
+                keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                             InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                await update.effective_chat.send_message(
+                    "ℹ️ В этом посте нет текста — только медиа. Анализировать нечего.",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return ConversationHandler.END
+
+            # Автоматический анализ через Claude
+            await update.effective_chat.send_message("🤖 Разбираю через Claude...")
+
+            claude_key = os.getenv('CLAUDE_API_KEY')
+            if not claude_key:
+                await update.effective_chat.send_message("❌ CLAUDE_API_KEY не задан в Railway — анализ недоступен.")
+                return ConversationHandler.END
+
+            prompt = (
+                "Проанализируй этот пост из Instagram и ответь на русском языке в таком формате:\n\n"
+                "О ЧЁМ ПОСТ:\n[1–2 предложения — суть, без воды]\n\n"
+                "КЛЮЧЕВЫЕ ИДЕИ:\n[3–5 пунктов через • ]\n\n"
+                "КАК ИСПОЛЬЗОВАТЬ ДЛЯ КОНТЕНТА:\n[2–3 конкретные идеи что можно сделать на основе этого]\n\n"
+                f"Текст поста:\n{caption[:2000]}"
+            )
+
+            client = anthropic.Anthropic(api_key=claude_key)
+            message = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            result = message.content[0].text.strip()
+
+            keyboard = [
+                [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
+                [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
+            ]
+            try:
+                await update.effective_chat.send_message(
+                    f"📊 *Анализ:*\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                await update.effective_chat.send_message(
+                    f"Анализ:\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+        except Exception as e:
+            logger.error(f"analyze_url_receive error: {e}", exc_info=True)
+            await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
+
+        return ConversationHandler.END
+
     async def handle_instagram_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Получить пост по ссылке Instagram и показать содержимое"""
         text = update.message.text.strip()
@@ -1048,6 +1163,16 @@ class TelegramBot:
             fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
         )
         self.application.add_handler(conv_handler)
+
+        # Обработчик "Разобрать пост по ссылке"
+        url_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.analyze_url_start, pattern='^analyze_url$')],
+            states={
+                WAIT_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.analyze_url_receive)]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
+        )
+        self.application.add_handler(url_conv)
 
         # Обработчик установки sessionid
         sessionid_conv = ConversationHandler(
