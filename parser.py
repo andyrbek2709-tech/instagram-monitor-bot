@@ -219,19 +219,19 @@ class Parser:
             logger.info(f"Post {post_data['post_id']} already exists")
             return False
 
-    def monitor_account(self, username: str, password: str, num_posts: int = 10) -> List[Dict]:
+    def monitor_account(self, target_username: str, login_username: str, login_password: str, num_posts: int = 10) -> List[Dict]:
         """Полный цикл мониторинга аккаунта"""
         try:
-            # Логин с сохранением сессии
-            client = self.login_manager.login(username, password)
+            # Логин с основным аккаунтом (andreyfuture27) с сохранением сессии
+            client = self.login_manager.login(login_username, login_password)
 
             # Задержка между аккаунтами
             delay = random.uniform(self.min_account_delay, self.max_account_delay)
             time.sleep(delay)
 
-            # Получение постов
+            # Получение постов из целевого аккаунта
             fetcher = PostFetcher(client)
-            posts = fetcher.fetch_posts(username, num_posts)
+            posts = fetcher.fetch_posts(target_username, num_posts)
 
             if not posts:
                 return []
@@ -242,7 +242,7 @@ class Parser:
                 cursor = conn.cursor()
 
                 # Получить или создать запись аккаунта
-                cursor.execute('SELECT id FROM monitored_accounts WHERE username = ?', (username,))
+                cursor.execute('SELECT id FROM monitored_accounts WHERE username = ?', (target_username,))
                 result = cursor.fetchone()
 
                 if result:
@@ -251,7 +251,7 @@ class Parser:
                     cursor.execute('''
                         INSERT INTO monitored_accounts (username, session_key, last_fetch, created_at)
                         VALUES (?, ?, ?, ?)
-                    ''', (username, '', datetime.utcnow().isoformat(), datetime.utcnow().isoformat()))
+                    ''', (target_username, '', datetime.utcnow().isoformat(), datetime.utcnow().isoformat()))
                     account_id = cursor.lastrowid
 
                 # Вставить посты
@@ -261,10 +261,10 @@ class Parser:
                         inserted += 1
 
                 conn.commit()
-                logger.info(f"Inserted {inserted} new posts for {username}")
+                logger.info(f"Inserted {inserted} new posts for {target_username}")
 
             return posts
 
         except Exception as e:
-            logger.error(f"Error monitoring account {username}: {e}")
+            logger.error(f"Error monitoring account {target_username}: {e}")
             return []

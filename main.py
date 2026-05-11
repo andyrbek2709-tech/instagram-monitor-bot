@@ -131,11 +131,12 @@ class InstagramMonitorBotPipeline:
             logger.info("Stage 0: Maintenance")
             self.maintenance.run_maintenance()
 
-            # Этап 1: Парсинг
+            # Этап 1: Парсинг (пример с основным аккаунтом)
             logger.info("Stage 1: Parsing")
             posts = self.parser.monitor_account(
-                self.instagram_username,
-                self.instagram_password,
+                target_username=self.instagram_username,
+                login_username=self.instagram_username,
+                login_password=self.instagram_password,
                 num_posts=10
             )
 

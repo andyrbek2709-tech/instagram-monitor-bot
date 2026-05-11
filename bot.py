@@ -601,10 +601,11 @@ class TelegramBot:
                         parse_mode='Markdown'
                     )
 
-                    # Вызвать парсер
+                    # Вызвать парсер (логиниться под основным аккаунтом, парсить целевой аккаунт)
                     posts = self.parser.monitor_account(
-                        username,
-                        self.instagram_password,
+                        target_username=username,
+                        login_username=self.instagram_username,
+                        login_password=self.instagram_password,
                         num_posts=num_posts
                     )
 
