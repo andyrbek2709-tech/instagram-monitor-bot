@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import requests
 import psycopg2
@@ -50,6 +51,16 @@ class HikerAPIClient:
         r.raise_for_status()
         return r.json()
 
+    def get_media_by_code(self, code: str) -> Dict:
+        """Получить пост по shortcode (из URL instagram.com/p/<code>/)"""
+        r = self.session.get(
+            f"{HIKER_BASE_URL}/media/by/code",
+            params={"code": code},
+            timeout=30
+        )
+        r.raise_for_status()
+        return r.json()
+
     def get_user_medias(self, user_id: str, amount: int = 10) -> List[Dict]:
         """Получить посты пользователя по user_id"""
         r = self.session.get(
@@ -83,6 +94,31 @@ class Parser:
         if not api_key:
             raise ValueError("HIKER_API_KEY environment variable is required. Add it to Railway.")
         self.hiker = HikerAPIClient(api_key)
+
+    def get_post_by_url(self, url: str) -> Optional[Dict]:
+        """Получить один пост по прямой ссылке Instagram"""
+        match = re.search(r'instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)', url)
+        if not match:
+            return None
+        code = match.group(1)
+        media = self.hiker.get_media_by_code(code)
+        if not media:
+            return None
+
+        caption_raw = media.get('caption') or ''
+        caption = self._parse_caption(caption_raw)
+        user = media.get('user') or {}
+
+        return {
+            'post_id': str(media.get('pk') or media.get('id') or ''),
+            'url': url,
+            'caption': caption,
+            'media_type': media.get('media_type', 1),
+            'likes': media.get('like_count', 0) or 0,
+            'comments': media.get('comment_count', 0) or 0,
+            'code': code,
+            'account': user.get('username', ''),
+        }
 
     def _parse_caption(self, caption_data) -> str:
         """Извлечь текст caption из разных форматов ответа"""

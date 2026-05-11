@@ -1,8 +1,10 @@
 import os
+import re
 import psycopg2
 import json
 import logging
 import asyncio
+import anthropic
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -898,6 +900,134 @@ class TelegramBot:
         else:
             await update.message.reply_text(help_text, parse_mode='Markdown')
 
+    async def handle_instagram_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Получить пост по ссылке Instagram и показать содержимое"""
+        text = update.message.text.strip()
+        match = re.search(r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)', text)
+        if not match:
+            return
+
+        url = match.group(0)
+        msg = await update.message.reply_text("⏳ Получаю пост по ссылке...")
+
+        try:
+            if not self.parser:
+                await msg.edit_text("❌ Парсер не инициализирован.")
+                return
+
+            post = self.parser.get_post_by_url(url)
+            if not post:
+                await msg.edit_text("❌ Не удалось получить пост. Проверь ссылку.")
+                return
+
+            context.user_data['last_post'] = post
+
+            caption = post.get('caption', '') or ''
+            account = post.get('account', '')
+            likes = post.get('likes', 0)
+            comments = post.get('comments', 0)
+
+            cap_display = (caption[:800] + '…') if len(caption) > 800 else caption
+
+            header = f"📌 *Пост{' от @' + account if account else ''}*\n\n"
+            body = cap_display if cap_display else '_(текст отсутствует — только медиа)_'
+            footer = f"\n\n❤️ {likes}  💬 {comments}\n🔗 {url}"
+
+            keyboard = [
+                [InlineKeyboardButton("📝 Краткое резюме", callback_data='analyze_summary')],
+                [InlineKeyboardButton("💡 Идеи для контента", callback_data='analyze_ideas')],
+                [InlineKeyboardButton("🌐 Перевести и адаптировать", callback_data='analyze_adapt')],
+            ]
+            try:
+                await msg.edit_text(
+                    header + body + footer,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                await msg.edit_text(
+                    f"Пост{' от @' + account if account else ''}\n\n{body}\n\n{url}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+        except Exception as e:
+            logger.error(f"handle_instagram_url error: {e}", exc_info=True)
+            await msg.edit_text(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
+
+    async def analyze_post_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Анализировать пост через Claude по выбранному действию"""
+        query = update.callback_query
+        await query.answer()
+
+        post = context.user_data.get('last_post')
+        if not post:
+            await query.edit_message_text("❌ Пост не найден. Отправь ссылку заново.")
+            return
+
+        caption = post.get('caption', '') or ''
+        action = query.data
+
+        if not caption:
+            await query.edit_message_text(
+                "⚠️ В этом посте нет текста (только видео/фото).\n\n"
+                "Ничего не могу проанализировать — нет текстового контента."
+            )
+            return
+
+        prompts = {
+            'analyze_summary': (
+                "Сделай краткое резюме этого поста в 2–3 предложениях на русском языке. "
+                "Только суть — без вводных слов типа 'В этом посте...':\n\n" + caption
+            ),
+            'analyze_ideas': (
+                "На основе этого поста предложи 3–5 конкретных идей для создания своего контента "
+                "на похожую тему. Отвечай на русском языке, каждую идею с новой строки:\n\n" + caption
+            ),
+            'analyze_adapt': (
+                "Переведи этот текст на русский язык (если он не на русском) и адаптируй для "
+                "русскоязычной аудитории. Сохрани смысл, но сделай живо и естественно:\n\n" + caption
+            ),
+        }
+
+        prompt = prompts.get(action, prompts['analyze_summary'])
+        await query.edit_message_text("🤖 Claude думает...")
+
+        try:
+            claude_key = os.getenv('CLAUDE_API_KEY')
+            if not claude_key:
+                await query.edit_message_text("❌ CLAUDE_API_KEY не задан в Railway")
+                return
+
+            client = anthropic.Anthropic(api_key=claude_key)
+            message = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=800,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            result = message.content[0].text.strip()
+
+            keyboard = [
+                [InlineKeyboardButton("📝 Резюме", callback_data='analyze_summary'),
+                 InlineKeyboardButton("💡 Идеи", callback_data='analyze_ideas')],
+                [InlineKeyboardButton("🌐 Перевести", callback_data='analyze_adapt')],
+                [InlineKeyboardButton("🔙 Меню", callback_data='back')],
+            ]
+            try:
+                await query.edit_message_text(
+                    f"🤖 *Результат:*\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                await query.edit_message_text(
+                    f"Результат:\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+        except Exception as e:
+            logger.error(f"analyze_post_action error: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка Claude: {str(e)[:300]}")
+
     def setup(self) -> Application:
         """Настроить приложение Telegram"""
         self.application = Application.builder().token(self.token).build()
@@ -968,6 +1098,21 @@ class TelegramBot:
         )
         self.application.add_handler(
             CallbackQueryHandler(self.debug_command, pattern='^debug_logs$')
+        )
+
+        # Обработчик прямых ссылок на посты Instagram
+        self.application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND &
+                filters.Regex(r'instagram\.com/(?:p|reel|tv)/'),
+                self.handle_instagram_url
+            )
+        )
+
+        # Claude-анализ поста
+        self.application.add_handler(
+            CallbackQueryHandler(self.analyze_post_action,
+                                 pattern='^analyze_(summary|ideas|adapt)$')
         )
 
         return self.application
