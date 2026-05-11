@@ -940,14 +940,64 @@ class TelegramBot:
             except Exception:
                 await status_msg.edit_text(f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{url}")
 
+            # Если нет текста — попробовать GPT-4o Vision по thumbnail
             if not caption:
-                keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
-                             InlineKeyboardButton("🔙 Меню", callback_data='back')]]
-                await update.effective_chat.send_message(
-                    "ℹ️ В этом посте нет текста — только медиа. Анализировать нечего.",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-                return ConversationHandler.END
+                thumbnail_url = post.get('thumbnail_url')
+                if not thumbnail_url:
+                    keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                                 InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                    await update.effective_chat.send_message(
+                        "⚠️ В этом посте нет текста и не удалось получить превью видео.",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                    return ConversationHandler.END
+
+                openai_key = os.getenv('OPENAI_API_KEY')
+                if not openai_key:
+                    keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                                 InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                    await update.effective_chat.send_message(
+                        "⚠️ Пост без текста — нужен OPENAI_API_KEY для анализа видео через GPT-4o Vision.\n"
+                        "Добавь его в Railway Variables.",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                    return ConversationHandler.END
+
+                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через GPT-4o Vision...")
+
+                try:
+                    from openai import OpenAI as _OpenAI
+                    oa_client = _OpenAI(api_key=openai_key)
+                    vision_resp = oa_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": thumbnail_url}},
+                                {"type": "text", "text": (
+                                    "Это превью видео/Reel из Instagram. "
+                                    "Подробно опиши: что показано, кто в кадре, тема, настроение, "
+                                    "о чём вероятно этот видео-пост. Ответь на русском языке."
+                                )}
+                            ]
+                        }],
+                        max_tokens=600
+                    )
+                    caption = vision_resp.choices[0].message.content.strip()
+                    logger.info(f"GPT-4o Vision description: {caption[:100]}...")
+                    await update.effective_chat.send_message(
+                        f"👁 *GPT-4o видит:*\n\n{caption}",
+                        parse_mode='Markdown'
+                    )
+                except Exception as ve:
+                    logger.error(f"GPT-4o Vision error: {ve}", exc_info=True)
+                    keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                                 InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                    await update.effective_chat.send_message(
+                        f"❌ GPT-4o Vision не смог проанализировать видео: {str(ve)[:200]}",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                    return ConversationHandler.END
 
             # Автоматический анализ через Claude
             await update.effective_chat.send_message("🤖 Разбираю через Claude...")
