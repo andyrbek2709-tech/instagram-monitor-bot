@@ -627,44 +627,25 @@ class TelegramBot:
                 )
                 return
 
-            results = []
-            total_posts = 0
+            all_posts = []
+            errors = []
 
             for acc_id, username, num_posts, min_likes, check_interval_hours in accounts:
                 try:
-                    logger.info(f"Parsing {username} ({num_posts} posts, min_likes={min_likes})...")
+                    logger.info(f"Parsing {username} ({num_posts} posts)...")
 
                     await query.edit_message_text(
-                        f"⏳ *Парсинг в процессе...*\n\n"
-                        f"📱 Обработка: @{username}\n"
-                        f"📊 Постов к парсингу: {num_posts}\n\n"
-                        f"⏱️ Это займет ~{num_posts * 15}сек...",
+                        f"⏳ Получаю посты @{username}...",
                         parse_mode='Markdown'
                     )
 
-                    # Вызвать парсер (логиниться под основным аккаунтом, парсить целевой аккаунт)
                     posts = self.parser.monitor_account(
                         target_username=username,
-                        login_username=self.instagram_username,
-                        login_password=self.instagram_password,
                         num_posts=num_posts
                     )
 
                     if posts:
-                        # Профильтровать посты
-                        filtered = self.filter.process_posts(posts)
-
-                        # Обогатить посты данными
-                        for i, post in enumerate(posts):
-                            if i < len(filtered):
-                                post.update({
-                                    'engagement_rate': filtered[i].get('engagement_rate', 0),
-                                    'text_length': filtered[i].get('text_length', 0)
-                                })
-
-                        # Анализировать посты
-                        analyses = self.analyzer.process_posts(posts)
-
+                        # Сохранить время последней проверки
                         conn = psycopg2.connect(self.db_url)
                         cursor = conn.cursor()
                         next_check = datetime.utcnow() + timedelta(hours=check_interval_hours)
@@ -676,61 +657,62 @@ class TelegramBot:
                         cursor.close()
                         conn.close()
 
-                        total_posts += len(posts)
-                        results.append({
-                            'username': username,
-                            'posts_parsed': len(posts),
-                            'status': '✅'
-                        })
-                    else:
-                        results.append({
-                            'username': username,
-                            'posts_parsed': 0,
-                            'status': '⚠️ Нет новых постов'
-                        })
+                        # Запустить анализ в фоне (для статистики в БД)
+                        try:
+                            if self.filter:
+                                self.filter.process_posts(posts)
+                            if self.analyzer:
+                                self.analyzer.process_posts(posts)
+                        except Exception as ae:
+                            logger.warning(f"Background analysis error (non-critical): {ae}")
+
+                        all_posts.extend(posts)
 
                 except Exception as e:
                     error_msg = f"{type(e).__name__}: {str(e)}"
                     logger.error(f"Error parsing {username}: {error_msg}", exc_info=True)
-                    results.append({
-                        'username': username,
-                        'posts_parsed': 0,
-                        'status': '❌',
-                        'error': error_msg
-                    })
+                    errors.append(f"@{username}: {error_msg[:200]}")
 
-            # Показать результаты
-            has_errors = any(r.get('error') for r in results)
-            if total_posts > 0 and not has_errors:
-                result_text = f"✅ *Парсинг завершен!*\n\n"
-            elif total_posts > 0:
-                result_text = f"⚠️ *Парсинг завершен с ошибками*\n\n"
-            else:
-                result_text = f"❌ *Парсинг не получил постов*\n\n"
+            # Показать итог
+            if not all_posts and not errors:
+                await query.edit_message_text("⚠️ Постов не найдено.")
+                return
 
-            result_text += f"📊 Всего постов спарсено: {total_posts}\n\n"
-            result_text += "*По аккаунтам:*\n"
-            for result in results:
-                result_text += f"{result['status']} @{result['username']} — {result['posts_parsed']} постов\n"
-                if result.get('error'):
-                    err = result['error'][:300]
-                    result_text += f"   `{err}`\n"
+            if errors and not all_posts:
+                err_text = "❌ Ошибка парсинга:\n" + "\n".join(errors)
+                keyboard = [[InlineKeyboardButton("🔍 Логи", callback_data='debug_logs'),
+                             InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                await query.edit_message_text(err_text, reply_markup=InlineKeyboardMarkup(keyboard))
+                return
 
-            if has_errors or total_posts == 0:
-                result_text += "\n💡 Нажми 'Подробные логи' для диагностики"
+            summary = f"✅ Готово — спарсено {len(all_posts)} постов. Отправляю каждый ниже 👇"
+            if errors:
+                summary += f"\n⚠️ Ошибки по некоторым аккаунтам: {'; '.join(errors)}"
+            await query.edit_message_text(summary)
 
-            keyboard = [
-                [InlineKeyboardButton("🔍 Подробные логи", callback_data='debug_logs')],
-                [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
-                [InlineKeyboardButton("🔙 Назад в меню", callback_data='back')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            # Отправить каждый пост отдельным сообщением
+            for i, post in enumerate(all_posts, 1):
+                caption = post.get('caption') or ''
+                caption_display = (caption[:600] + '…') if len(caption) > 600 else caption
+                url = post.get('url', '')
+                account = post.get('account', '')
 
-            # Markdown может сломаться на спецсимволах в ошибке — подстраховываемся
-            try:
-                await query.edit_message_text(result_text, reply_markup=reply_markup, parse_mode='Markdown')
-            except Exception:
-                await query.edit_message_text(result_text, reply_markup=reply_markup)
+                post_text = f"📌 *Пост {i} — @{account}*\n\n"
+                if caption_display:
+                    post_text += caption_display
+                else:
+                    post_text += '_(текст отсутствует — возможно только видео)_'
+                if url:
+                    post_text += f"\n\n🔗 {url}"
+
+                try:
+                    await update.effective_chat.send_message(post_text, parse_mode='Markdown')
+                except Exception:
+                    # Если Markdown сломался на спецсимволах — отправить без форматирования
+                    plain = f"Пост {i} — @{account}\n\n{caption_display or '(нет текста)'}"
+                    if url:
+                        plain += f"\n{url}"
+                    await update.effective_chat.send_message(plain)
 
         except Exception as e:
             logger.error(f"Error in start_parsing: {e}", exc_info=True)
