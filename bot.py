@@ -583,97 +583,116 @@ class TelegramBot:
     async def search_hashtag_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Получить хэштег и выполнить глобальный поиск"""
         text = update.message.text.strip()
-        hashtag = text.lstrip('#').strip()
+        # Разделяем на отдельные хэштеги
+        raw_tags = re.split(r'[,#\s]+', text)
+        hashtags = [t.strip().lower() for t in raw_tags if t.strip()]
 
-        if not hashtag or len(hashtag) > 100:
+        if not hashtags:
             await update.message.reply_text("❌ Некорректный хэштег. Попробуй ещё раз или /cancel")
+            return SEARCH_HASHTAG
+
+        if len(hashtags) > 5:
+            await update.message.reply_text("❌ Слишком много хэштегов. Максимум 5 за раз.")
             return SEARCH_HASHTAG
 
         if not self.parser:
             await update.message.reply_text("❌ Парсер не инициализирован.")
             return ConversationHandler.END
 
-        status_msg = await update.message.reply_text(f"🔍 Ищу посты с `#{hashtag}`...", parse_mode='Markdown')
+        status_msg = await update.message.reply_text(f"🔍 Ищу посты по {len(hashtags)} хэштегам...")
 
-        try:
-            posts = await asyncio.to_thread(self.parser.search_by_hashtag, hashtag, 20)
+        all_posts = []
+        for h in hashtags:
+            try:
+                await status_msg.edit_text(f"🔍 Ищу `#{h}`...", parse_mode='Markdown')
+                posts = await asyncio.to_thread(self.parser.search_by_hashtag, h, 10)
+                if posts:
+                    for p in posts:
+                        p['search_hashtag'] = h
+                    all_posts.extend(posts)
+            except Exception as e:
+                logger.warning(f"Search error for #{h}: {e}")
 
-            if not posts:
-                await status_msg.edit_text(f"❌ Постов с хэштегом `#{hashtag}` не найдено.", parse_mode='Markdown')
-                return ConversationHandler.END
-
-            # Сводка
-            total = len(posts)
-            total_likes = sum(p.get('likes', 0) for p in posts)
-            total_comments = sum(p.get('comments', 0) for p in posts)
-            top_post = posts[0]
-
+        if not all_posts:
             await status_msg.edit_text(
-                f"🌐 *Результаты поиска `#{hashtag}`*\n\n"
-                f"• Найдено: {total} постов\n"
-                f"• Всего лайков: {total_likes:,}\n"
-                f"• Всего комментариев: {total_comments:,}\n"
-                f"• Топ пост: ♥ {top_post.get('likes', 0)} 💬 {top_post.get('comments', 0)}\n"
-                f"  от @{top_post.get('account', '?')}\n\n"
-                f"Отправляю каждый пост ниже 👇",
+                f"❌ Постов по хэштегам не найдено.\n\n"
+                f"Попробуй другие хэштеги или проверь соединение с HikerAPI.",
                 parse_mode='Markdown'
             )
-
-            # Отправить каждый пост (топ-10)
-            for i, post in enumerate(posts[:10], 1):
-                caption = post.get('caption', '') or ''
-                cap_display = (caption[:500] + '…') if len(caption) > 500 else (caption or '_(нет текста)_')
-                likes = post.get('likes', 0)
-                comments = post.get('comments', 0)
-                account = post.get('account', '')
-                url = post.get('url', '')
-
-                # Проверяем, нужен ли перевод (есть CLAUDE_API_KEY)
-                translated = ''
-                claude_key = os.getenv('CLAUDE_API_KEY')
-                if claude_key and caption and not self._is_russian(caption):
-                    try:
-                        import anthropic
-                        client = anthropic.Anthropic(api_key=claude_key)
-                        msg = client.messages.create(
-                            model="claude-haiku-4-5-20251001",
-                            max_tokens=300,
-                            messages=[{"role": "user", "content": (
-                                f"Переведи этот текст на русский язык. Только перевод, без комментариев:\n\n{caption[:1500]}"
-                            )}]
-                        )
-                        translated = msg.content[0].text.strip()
-                    except Exception:
-                        pass
-
-                post_text = f"{i}. 📌 *@{account}*  ♥{likes} 💬{comments}\n\n{cap_display}"
-                if translated:
-                    post_text += f"\n\n🔄 *Перевод:*\n{translated}"
-                if url:
-                    post_text += f"\n\n🔗 {url}"
-
-                try:
-                    await update.effective_chat.send_message(post_text, parse_mode='Markdown')
-                except Exception:
-                    plain = f"{i}. @{account} ♥{likes} 💬{comments}\n\n{cap_display}"
-                    if translated:
-                        plain += f"\n\nПеревод:\n{translated}"
-                    if url:
-                        plain += f"\n{url}"
-                    await update.effective_chat.send_message(plain)
-
-            # Если постов больше 10
-            if len(posts) > 10:
-                await update.effective_chat.send_message(
-                    f"📌 Показано 10 из {total} постов. Хочешь больше?\n"
-                    f"Нажми «🔍 Поиск по хэштегу 🌐» снова и укажи больше."
-                )
-
-        except Exception as e:
-            logger.error(f"search_hashtag error: {e}", exc_info=True)
-            await status_msg.edit_text(f"❌ Ошибка поиска: {str(e)[:300]}")
-        finally:
             return ConversationHandler.END
+
+        # Сортируем по engagement
+        all_posts.sort(key=lambda p: p.get('engagement_score', p.get('likes', 0)), reverse=True)
+
+        total = len(all_posts)
+        total_likes = sum(p.get('likes', 0) for p in all_posts)
+        total_comments = sum(p.get('comments', 0) for p in all_posts)
+        top_post = all_posts[0]
+        hashtags_str = ', '.join(f'#{h}' for h in hashtags)
+
+        await status_msg.edit_text(
+            f"🌐 *Результаты поиска*\n\n"
+            f"• Хэштеги: {hashtags_str}\n"
+            f"• Найдено: {total} постов\n"
+            f"• Всего лайков: {total_likes:,}\n"
+            f"• Всего комментариев: {total_comments:,}\n"
+            f"• Топ: ♥ {top_post.get('likes', 0)} 💬 {top_post.get('comments', 0)}\n"
+            f"  от @{top_post.get('account', '?')}\n\n"
+            f"Отправляю каждый пост ниже 👇",
+            parse_mode='Markdown'
+        )
+
+        # Отправить каждый пост (макс 10)
+        for i, post in enumerate(all_posts[:10], 1):
+            caption = post.get('caption', '') or ''
+            cap_display = (caption[:500] + '…') if len(caption) > 500 else (caption or '_(нет текста)_')
+            likes = post.get('likes', 0)
+            comments = post.get('comments', 0)
+            account = post.get('account', '')
+            url = post.get('url', '')
+            tag = post.get('search_hashtag', '')
+
+            # Перевод
+            translated = ''
+            claude_key = os.getenv('CLAUDE_API_KEY')
+            if claude_key and caption and not self._is_russian(caption):
+                try:
+                    import anthropic
+                    client = anthropic.Anthropic(api_key=claude_key)
+                    msg = client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=300,
+                        messages=[{"role": "user", "content": (
+                            f"Переведи этот текст на русский язык. Только перевод, без комментариев:\n\n{caption[:1500]}"
+                        )}]
+                    )
+                    translated = msg.content[0].text.strip()
+                except Exception:
+                    pass
+
+            tag_label = f"[#{tag}] " if tag else ""
+            post_text = f"{i}. {tag_label}📌 *@{account}*  ♥{likes} 💬{comments}\n\n{cap_display}"
+            if translated:
+                post_text += f"\n\n🔄 *Перевод:*\n{translated}"
+            if url:
+                post_text += f"\n\n🔗 {url}"
+
+            try:
+                await update.effective_chat.send_message(post_text, parse_mode='Markdown')
+            except Exception:
+                plain = f"{i}. {tag_label}@{account} ♥{likes} 💬{comments}\n\n{cap_display}"
+                if translated:
+                    plain += f"\n\nПеревод:\n{translated}"
+                if url:
+                    plain += f"\n{url}"
+                await update.effective_chat.send_message(plain)
+
+        if len(all_posts) > 10:
+            await update.effective_chat.send_message(
+                f"📌 Показано 10 из {total} постов. Нажми «🔍 Поиск по хэштегу 🌐» чтобы посмотреть ещё."
+            )
+
+        return ConversationHandler.END
 
     @staticmethod
     def _is_russian(text: str) -> bool:
