@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 ADD_ACCOUNT, CONFIRM_ACCOUNT, SELECT_NUM_POSTS, SELECT_INTERVAL = range(4)
 ADD_HASHTAG = 5
 SEARCH_HASHTAG = 6
+SEARCH_YOUTUBE = 7
+SEARCH_TIKTOK = 8
 WAIT_SESSIONID = 100
 WAIT_URL = 101
 
@@ -109,6 +111,14 @@ class TelegramBot:
         self.analyzer = analyzer
         self.instagram_username = os.getenv('INSTAGRAM_USERNAME')
         self.instagram_password = os.getenv('INSTAGRAM_PASSWORD')
+        # Универсальный парсер YouTube/TikTok через yt-dlp
+        try:
+            from media_parser import MediaParser
+            self.media_parser = MediaParser()
+            logger.info("MediaParser (yt-dlp) initialized")
+        except Exception as e:
+            self.media_parser = None
+            logger.warning(f"MediaParser not available: {e}")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик /start"""
@@ -116,6 +126,8 @@ class TelegramBot:
             [InlineKeyboardButton("🔗 Разобрать пост по ссылке", callback_data='analyze_url')],
             [InlineKeyboardButton("🚀 Начать парсинг аккаунта", callback_data='start_parsing')],
             [InlineKeyboardButton("🔍 Поиск по хэштегу 🌐", callback_data='search_hashtag')],
+            [InlineKeyboardButton("📺 YouTube поиск", callback_data='search_youtube'),
+             InlineKeyboardButton("🎵 TikTok поиск", callback_data='search_tiktok')],
             [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
             [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
             [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
@@ -694,6 +706,159 @@ class TelegramBot:
 
         return ConversationHandler.END
 
+    async def search_youtube_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Начать поиск на YouTube"""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "📺 *Поиск на YouTube*\n\n"
+            "Отправь поисковый запрос. Например:\n"
+            "`грузоперевозки казахстан` или `логистика 2025`\n\n"
+            "Я найду актуальные видео и переведу описание на русский.\n\n"
+            "Отправь /cancel чтобы отменить.",
+            parse_mode='Markdown'
+        )
+        return SEARCH_YOUTUBE
+
+    async def search_youtube_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Получить запрос и найти на YouTube"""
+        query_text = update.message.text.strip()
+        if not query_text:
+            await update.message.reply_text("❌ Пустой запрос. Попробуй ещё раз или /cancel")
+            return SEARCH_YOUTUBE
+
+        if not self.media_parser:
+            await update.message.reply_text("❌ MediaParser не доступен (yt-dlp не установлен)")
+            return ConversationHandler.END
+
+        status_msg = await update.message.reply_text(f"📺 Ищу на YouTube: «{query_text}»...")
+
+        try:
+            videos = await asyncio.to_thread(self.media_parser.search, query_text, 8)
+
+            if not videos:
+                await status_msg.edit_text(f"❌ Ничего не найдено по запросу: «{query_text}»")
+                return ConversationHandler.END
+
+            await status_msg.edit_text(
+                f"📺 *Результаты поиска:* «{query_text}»\n"
+                f"Найдено: {len(videos)} видео\n"
+                f"Отправляю каждое ниже 👇",
+                parse_mode='Markdown'
+            )
+
+            for i, vid in enumerate(videos, 1):
+                title = vid.get('title', '')
+                channel = vid.get('channel', '')
+                views = vid.get('views', 0)
+                likes = vid.get('likes', 0)
+                duration = vid.get('duration_str', '')
+                url = vid.get('url', '')
+                description = vid.get('description', '')
+
+                # Перевод описания
+                translated = ''
+                claude_key = os.getenv('CLAUDE_API_KEY')
+                if claude_key and description and not self._is_russian(description):
+                    try:
+                        import anthropic
+                        client = anthropic.Anthropic(api_key=claude_key)
+                        msg = client.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=300,
+                            messages=[{"role": "user", "content": (
+                                f"Переведи это описание на русский язык. Только перевод:\n\n{description[:1500]}"
+                            )}]
+                        )
+                        translated = msg.content[0].text.strip()
+                    except Exception:
+                        pass
+
+                text = f"{i}. 📺 *{title}*\n👤 {channel}  ⏱ {duration}\n👁 {views:,}  ♥ {likes:,}"
+                if translated:
+                    text += f"\n\n🔄 *Описание:*\n{translated}"
+                text += f"\n\n🔗 {url}"
+
+                try:
+                    await update.effective_chat.send_message(text, parse_mode='Markdown')
+                except Exception:
+                    plain = f"{i}. {title}\n{channel} | {duration}\n👁 {views} ♥ {likes}"
+                    if translated:
+                        plain += f"\n\nОписание:\n{translated}"
+                    plain += f"\n{url}"
+                    await update.effective_chat.send_message(plain)
+
+        except Exception as e:
+            logger.error(f"YouTube search error: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ Ошибка поиска на YouTube: {str(e)[:300]}")
+
+        return ConversationHandler.END
+
+    async def search_tiktok_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Начать поиск в TikTok"""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "🎵 *Поиск в TikTok*\n\n"
+            "Отправь поисковый запрос. Например:\n"
+            "`доставка` или `бизнес идеи`\n\n"
+            "Я найду актуальные видео из TikTok.\n\n"
+            "Отправь /cancel чтобы отменить.",
+            parse_mode='Markdown'
+        )
+        return SEARCH_TIKTOK
+
+    async def search_tiktok_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Получить запрос и найти в TikTok"""
+        query_text = update.message.text.strip()
+        if not query_text:
+            await update.message.reply_text("❌ Пустой запрос. Попробуй ещё раз или /cancel")
+            return SEARCH_TIKTOK
+
+        if not self.media_parser:
+            await update.message.reply_text("❌ MediaParser не доступен (yt-dlp не установлен)")
+            return ConversationHandler.END
+
+        status_msg = await update.message.reply_text(f"🎵 Ищу в TikTok: «{query_text}»...")
+
+        try:
+            videos = await asyncio.to_thread(self.media_parser.search_tiktok, query_text, 8)
+
+            if not videos:
+                await status_msg.edit_text(f"❌ Ничего не найдено в TikTok по запросу: «{query_text}»")
+                return ConversationHandler.END
+
+            await status_msg.edit_text(
+                f"🎵 *Результаты TikTok:* «{query_text}»\n"
+                f"Найдено: {len(videos)} видео\n"
+                f"Отправляю каждое ниже 👇",
+                parse_mode='Markdown'
+            )
+
+            for i, vid in enumerate(videos, 1):
+                title = vid.get('title', '')
+                channel = vid.get('channel', '')
+                views = vid.get('views', 0)
+                likes = vid.get('likes', 0)
+                duration = vid.get('duration_str', '')
+                url = vid.get('url', '')
+
+                text = f"{i}. 🎵 *{title}*\n👤 {channel}  ⏱ {duration}\n👁 {views:,}  ♥ {likes:,}"
+                text += f"\n\n🔗 {url}"
+
+                try:
+                    await update.effective_chat.send_message(text, parse_mode='Markdown')
+                except Exception:
+                    plain = f"{i}. {title}\n{channel} | {duration}\n👁 {views} ♥ {likes}"
+                    plain += f"\n{url}"
+                    await update.effective_chat.send_message(plain)
+
+        except Exception as e:
+            logger.error(f"TikTok search error: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ Ошибка поиска в TikTok: {str(e)[:300]}")
+
+        return ConversationHandler.END
+
     @staticmethod
     def _is_russian(text: str) -> bool:
         """Проверить, что текст в основном на русском"""
@@ -712,6 +877,8 @@ class TelegramBot:
             [InlineKeyboardButton("🔗 Разобрать пост по ссылке", callback_data='analyze_url')],
             [InlineKeyboardButton("🚀 Начать парсинг аккаунта", callback_data='start_parsing')],
             [InlineKeyboardButton("🔍 Поиск по хэштегу 🌐", callback_data='search_hashtag')],
+            [InlineKeyboardButton("📺 YouTube поиск", callback_data='search_youtube'),
+             InlineKeyboardButton("🎵 TikTok поиск", callback_data='search_tiktok')],
             [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
             [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
             [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
@@ -1784,6 +1951,26 @@ class TelegramBot:
             fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
         )
         self.application.add_handler(search_conv)
+
+        # ── YouTube поиск ──
+        youtube_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.search_youtube_start, pattern='^search_youtube$')],
+            states={
+                SEARCH_YOUTUBE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.search_youtube_receive)]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
+        )
+        self.application.add_handler(youtube_conv)
+
+        # ── TikTok поиск ──
+        tiktok_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.search_tiktok_start, pattern='^search_tiktok$')],
+            states={
+                SEARCH_TIKTOK: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.search_tiktok_receive)]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
+        )
+        self.application.add_handler(tiktok_conv)
 
         return self.application
 
