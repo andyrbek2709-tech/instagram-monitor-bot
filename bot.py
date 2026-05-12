@@ -643,10 +643,7 @@ class TelegramBot:
                         parse_mode='Markdown'
                     )
 
-                    posts = self.parser.monitor_account(
-                        target_username=username,
-                        num_posts=num_posts
-                    )
+                    posts = await asyncio.to_thread(self.parser.monitor_account, target_username=username, num_posts=num_posts)
 
                     if posts:
                         # Сохранить время последней проверки
@@ -664,9 +661,9 @@ class TelegramBot:
                         # Запустить анализ в фоне (для статистики в БД)
                         try:
                             if self.filter:
-                                self.filter.process_posts(posts)
+                                await asyncio.to_thread(self.filter.process_posts, posts)
                             if self.analyzer:
-                                self.analyzer.process_posts(posts)
+                                await asyncio.to_thread(self.analyzer.process_posts, posts)
                         except Exception as ae:
                             logger.warning(f"Background analysis error (non-critical): {ae}")
 
@@ -916,7 +913,7 @@ class TelegramBot:
                 await status_msg.edit_text("❌ Парсер не инициализирован.")
                 return ConversationHandler.END
 
-            post = self.parser.get_post_by_url(url)
+            post = await asyncio.to_thread(self.parser.get_post_by_url, url)
             if not post:
                 await status_msg.edit_text(
                     "❌ Не удалось получить пост.\n\n"
@@ -1239,7 +1236,7 @@ class TelegramBot:
                 await msg.edit_text("❌ Парсер не инициализирован.")
                 return
 
-            post = self.parser.get_post_by_url(url)
+            post = await asyncio.to_thread(self.parser.get_post_by_url, url)
             if not post:
                 await msg.edit_text("❌ Не удалось получить пост. Проверь ссылку.")
                 return
