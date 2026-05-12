@@ -625,6 +625,22 @@ class TelegramBot:
             except Exception as e:
                 logger.warning(f"Search error for #{h}: {e}")
 
+        # Если HikerAPI ничего не дал — пробуем yt-dlp для Instagram
+        if not all_posts and self.media_parser:
+            await status_msg.edit_text("🔄 HikerAPI не дал результатов, пробую yt-dlp...")
+            for h in hashtags:
+                try:
+                    posts = await asyncio.to_thread(
+                        self.media_parser.search, f"#{h}", 5, platform="ytsearch"
+                    )
+                    if posts:
+                        for p in posts:
+                            p['search_hashtag'] = h
+                            p['source'] = 'yt-dlp'
+                        all_posts.extend(posts)
+                except Exception as e:
+                    logger.warning(f"yt-dlp fallback error for #{h}: {e}")
+
         if not all_posts:
             await status_msg.edit_text(
                 f"❌ Постов по хэштегам не найдено.\n\n"
