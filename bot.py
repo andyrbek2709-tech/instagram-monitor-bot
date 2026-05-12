@@ -17,6 +17,8 @@ import random
 logger = logging.getLogger(__name__)
 
 ADD_ACCOUNT, CONFIRM_ACCOUNT, SELECT_NUM_POSTS, SELECT_INTERVAL = range(4)
+ADD_HASHTAG = 5
+SEARCH_HASHTAG = 6
 WAIT_SESSIONID = 100
 WAIT_URL = 101
 
@@ -113,6 +115,7 @@ class TelegramBot:
         keyboard = [
             [InlineKeyboardButton("🔗 Разобрать пост по ссылке", callback_data='analyze_url')],
             [InlineKeyboardButton("🚀 Начать парсинг аккаунта", callback_data='start_parsing')],
+            [InlineKeyboardButton("🔍 Поиск по хэштегу 🌐", callback_data='search_hashtag')],
             [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
             [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
             [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
@@ -355,6 +358,7 @@ class TelegramBot:
         keyboard = [
             [InlineKeyboardButton("🔔 Время дайджеста", callback_data='digest_time')],
             [InlineKeyboardButton("📏 Минимальная релевантность", callback_data='min_relevance')],
+            [InlineKeyboardButton("🏷 Мои хэштеги", callback_data='my_hashtags')],
             [InlineKeyboardButton("🔙 Назад", callback_data='back')]
         ]
 
@@ -401,6 +405,285 @@ class TelegramBot:
             parse_mode='Markdown'
         )
 
+    async def my_hashtags_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Показать управление хэштегами"""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        conn = psycopg2.connect(self.db_url)
+        cursor = conn.cursor()
+        cursor.execute('SELECT hashtag FROM user_hashtags WHERE user_id = %s ORDER BY created_at DESC', (user_id,))
+        tags = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+
+        text = "🏷 *Мои хэштеги*\n\n"
+        if tags:
+            text += "Ты отслеживаешь эти хэштеги:\n"
+            for t in tags:
+                text += f"• `#{t}`\n"
+        else:
+            text += "У тебя пока нет отслеживаемых хэштегов.\n\n"
+            text += "Нажми «Добавить хэштег» и введи #тему для отслеживания."
+
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить хэштег", callback_data='hashtag_add')],
+        ]
+        if tags:
+            keyboard.append([InlineKeyboardButton("🗑 Очистить все", callback_data='hashtag_clear')])
+            keyboard.append([InlineKeyboardButton("📊 Аналитика", callback_data='hashtag_stats')])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='settings')])
+
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    async def hashtag_add_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Начать добавление хэштега"""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "➕ *Добавить хэштег*\n\n"
+            "Отправь хэштег для отслеживания. Например:\n"
+            "`#грузоперевозки` или просто `грузоперевозки`\n\n"
+            "Отправь /cancel чтобы отменить.",
+            parse_mode='Markdown'
+        )
+        return ADD_HASHTAG
+
+    async def hashtag_add_save(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Сохранить хэштег"""
+        text = update.message.text.strip().lower().lstrip('#')
+        if not text or len(text) > 100:
+            await update.message.reply_text("❌ Некорректный хэштег. Попробуй ещё раз или /cancel")
+            return ADD_HASHTAG
+
+        user_id = update.effective_user.id
+        conn = psycopg2.connect(self.db_url)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                'INSERT INTO user_hashtags (user_id, hashtag, created_at) VALUES (%s, %s, %s) ON CONFLICT (user_id, hashtag) DO NOTHING',
+                (user_id, text, datetime.utcnow().isoformat())
+            )
+            conn.commit()
+            await update.message.reply_text(f"✅ Хэштег `#{text}` добавлен для отслеживания!", parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Error saving hashtag: {e}")
+            await update.message.reply_text("❌ Ошибка при сохранении хэштега")
+        finally:
+            cursor.close()
+            conn.close()
+
+        return ConversationHandler.END
+
+    async def hashtag_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Очистить все хэштеги пользователя"""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        conn = psycopg2.connect(self.db_url)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM user_hashtags WHERE user_id = %s', (user_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        await query.edit_message_text("🗑 Все хэштеги удалены.\n\nНажми «➕ Добавить хэштег» чтобы добавить новые.")
+
+    async def hashtag_stats_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Показать аналитику по хэштегам"""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        conn = psycopg2.connect(self.db_url)
+        cursor = conn.cursor()
+
+        # Получить хэштеги пользователя
+        cursor.execute('SELECT hashtag FROM user_hashtags WHERE user_id = %s ORDER BY created_at', (user_id,))
+        user_tags = [row[0] for row in cursor.fetchall()]
+
+        if not user_tags:
+            await query.edit_message_text(
+                "📊 *Аналитика хэштегов*\n\n"
+                "Сначала добавь хэштеги в настройках: ⚙️ → 🏷 Мои хэштеги",
+                parse_mode='Markdown'
+            )
+            cursor.close()
+            conn.close()
+            return
+
+        # Получить статистику из БД
+        placeholders = ','.join(['%s'] * len(user_tags))
+        cursor.execute(f'''
+            SELECT hs.hashtag,
+                   COUNT(DISTINCT hs.post_id) as post_count,
+                   COALESCE(AVG(hs.likes), 0) as avg_likes,
+                   COALESCE(AVG(hs.comments), 0) as avg_comments,
+                   COUNT(DISTINCT ma.username) as accounts_count,
+                   MAX(hs.fetched_at) as last_seen
+            FROM hashtag_stats hs
+            LEFT JOIN monitored_accounts ma ON hs.account_id = ma.id
+            WHERE hs.hashtag IN ({placeholders})
+            GROUP BY hs.hashtag
+            ORDER BY post_count DESC
+        ''', user_tags)
+        rows = cursor.fetchall()
+
+        # Также показать общую статистику по всем постам
+        cursor.execute(f'''
+            SELECT AVG(likes), AVG(comments)
+            FROM hashtag_stats
+            WHERE hashtag IN ({placeholders})
+        ''', user_tags)
+        overall = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            text = "📊 *Аналитика хэштегов*\n\n"
+            text += "По этим хэштегам ещё нет данных. Запусти парсинг аккаунтов."
+        else:
+            text = "📊 *Аналитика хэштегов*\n\n"
+            if overall and overall[0]:
+                text += f"📈 Всего: {sum(r[1] for r in rows)} постов, "
+                text += f"средние лайки {overall[0]:.0f}, комменты {overall[1]:.0f}\n\n"
+            text += "По хэштегам:\n\n"
+            for hashtag, post_count, avg_likes, avg_comments, acc_count, last_seen in rows:
+                er = (avg_likes + avg_comments * 2) / max(avg_likes + 1, 10) if avg_likes > 0 else 0
+                text += f"`#{hashtag}`\n"
+                text += f"  • {post_count} постов, {acc_count} аккаунтов\n"
+                text += f"  • ♥ {avg_likes:.0f} 💬 {avg_comments:.0f} 📊 ER: {er:.1%}\n\n"
+
+        keyboard = [
+            [InlineKeyboardButton("🔙 К моим хэштегам", callback_data='my_hashtags')],
+            [InlineKeyboardButton("🔙 Настройки", callback_data='settings')]
+        ]
+
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        except Exception:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def search_hashtag_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Начать глобальный поиск по хэштегу"""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "🌐 *Глобальный поиск по хэштегу*\n\n"
+            "Отправь хэштег для поиска по всему Instagram.\n"
+            "Например: `#грузоперевозки` или просто `грузоперевозки`\n\n"
+            "Я найду последние посты с этим хэштегом и покажу их.\n\n"
+            "Отправь /cancel чтобы отменить.",
+            parse_mode='Markdown'
+        )
+        return SEARCH_HASHTAG
+
+    async def search_hashtag_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Получить хэштег и выполнить глобальный поиск"""
+        text = update.message.text.strip()
+        hashtag = text.lstrip('#').strip()
+
+        if not hashtag or len(hashtag) > 100:
+            await update.message.reply_text("❌ Некорректный хэштег. Попробуй ещё раз или /cancel")
+            return SEARCH_HASHTAG
+
+        if not self.parser:
+            await update.message.reply_text("❌ Парсер не инициализирован.")
+            return ConversationHandler.END
+
+        status_msg = await update.message.reply_text(f"🔍 Ищу посты с `#{hashtag}`...", parse_mode='Markdown')
+
+        try:
+            posts = await asyncio.to_thread(self.parser.search_by_hashtag, hashtag, 20)
+
+            if not posts:
+                await status_msg.edit_text(f"❌ Постов с хэштегом `#{hashtag}` не найдено.", parse_mode='Markdown')
+                return ConversationHandler.END
+
+            # Сводка
+            total = len(posts)
+            total_likes = sum(p.get('likes', 0) for p in posts)
+            total_comments = sum(p.get('comments', 0) for p in posts)
+            top_post = posts[0]
+
+            await status_msg.edit_text(
+                f"🌐 *Результаты поиска `#{hashtag}`*\n\n"
+                f"• Найдено: {total} постов\n"
+                f"• Всего лайков: {total_likes:,}\n"
+                f"• Всего комментариев: {total_comments:,}\n"
+                f"• Топ пост: ♥ {top_post.get('likes', 0)} 💬 {top_post.get('comments', 0)}\n"
+                f"  от @{top_post.get('account', '?')}\n\n"
+                f"Отправляю каждый пост ниже 👇",
+                parse_mode='Markdown'
+            )
+
+            # Отправить каждый пост (топ-10)
+            for i, post in enumerate(posts[:10], 1):
+                caption = post.get('caption', '') or ''
+                cap_display = (caption[:500] + '…') if len(caption) > 500 else (caption or '_(нет текста)_')
+                likes = post.get('likes', 0)
+                comments = post.get('comments', 0)
+                account = post.get('account', '')
+                url = post.get('url', '')
+
+                # Проверяем, нужен ли перевод (есть CLAUDE_API_KEY)
+                translated = ''
+                claude_key = os.getenv('CLAUDE_API_KEY')
+                if claude_key and caption and not self._is_russian(caption):
+                    try:
+                        import anthropic
+                        client = anthropic.Anthropic(api_key=claude_key)
+                        msg = client.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=300,
+                            messages=[{"role": "user", "content": (
+                                f"Переведи этот текст на русский язык. Только перевод, без комментариев:\n\n{caption[:1500]}"
+                            )}]
+                        )
+                        translated = msg.content[0].text.strip()
+                    except Exception:
+                        pass
+
+                post_text = f"{i}. 📌 *@{account}*  ♥{likes} 💬{comments}\n\n{cap_display}"
+                if translated:
+                    post_text += f"\n\n🔄 *Перевод:*\n{translated}"
+                if url:
+                    post_text += f"\n\n🔗 {url}"
+
+                try:
+                    await update.effective_chat.send_message(post_text, parse_mode='Markdown')
+                except Exception:
+                    plain = f"{i}. @{account} ♥{likes} 💬{comments}\n\n{cap_display}"
+                    if translated:
+                        plain += f"\n\nПеревод:\n{translated}"
+                    if url:
+                        plain += f"\n{url}"
+                    await update.effective_chat.send_message(plain)
+
+            # Если постов больше 10
+            if len(posts) > 10:
+                await update.effective_chat.send_message(
+                    f"📌 Показано 10 из {total} постов. Хочешь больше?\n"
+                    f"Нажми «🔍 Поиск по хэштегу 🌐» снова и укажи больше."
+                )
+
+        except Exception as e:
+            logger.error(f"search_hashtag error: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ Ошибка поиска: {str(e)[:300]}")
+        finally:
+            return ConversationHandler.END
+
+    @staticmethod
+    def _is_russian(text: str) -> bool:
+        """Проверить, что текст в основном на русском"""
+        if not text:
+            return True
+        russian_chars = sum(1 for c in text if 'а' <= c.lower() <= 'я' or c.lower() == 'ё')
+        total_chars = sum(1 for c in text if c.isalpha())
+        return total_chars == 0 or (russian_chars / total_chars) > 0.3
+
     async def back_to_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Вернуться в главное меню"""
         query = update.callback_query
@@ -409,6 +692,7 @@ class TelegramBot:
         keyboard = [
             [InlineKeyboardButton("🔗 Разобрать пост по ссылке", callback_data='analyze_url')],
             [InlineKeyboardButton("🚀 Начать парсинг аккаунта", callback_data='start_parsing')],
+            [InlineKeyboardButton("🔍 Поиск по хэштегу 🌐", callback_data='search_hashtag')],
             [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
             [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
             [InlineKeyboardButton("📊 Получить дайджест", callback_data='get_digest')],
@@ -1450,6 +1734,37 @@ class TelegramBot:
         self.application.add_handler(
             CallbackQueryHandler(self.create_prompt_action, pattern='^create_prompt$')
         )
+
+        # ── Хэндлеры для хэштегов ──
+        self.application.add_handler(
+            CallbackQueryHandler(self.my_hashtags_handler, pattern='^my_hashtags$')
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self.hashtag_clear, pattern='^hashtag_clear$')
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self.hashtag_stats_handler, pattern='^hashtag_stats$')
+        )
+
+        # ConversationHandler для добавления хэштега
+        hashtag_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.hashtag_add_start, pattern='^hashtag_add$')],
+            states={
+                ADD_HASHTAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.hashtag_add_save)]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
+        )
+        self.application.add_handler(hashtag_conv)
+
+        # ── Глобальный поиск по хэштегу ──
+        search_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.search_hashtag_start, pattern='^search_hashtag$')],
+            states={
+                SEARCH_HASHTAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.search_hashtag_receive)]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
+        )
+        self.application.add_handler(search_conv)
 
         return self.application
 

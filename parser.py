@@ -84,6 +84,38 @@ class HikerAPIClient:
             return data.get("items", [])
         return []
 
+    def get_tag_medias(self, tag_name: str, amount: int = 20) -> List[Dict]:
+        """Получить посты по хэштегу (глобальный поиск)"""
+        r = self.session.get(
+            f"{HIKER_BASE_URL}/tag/medias",
+            params={"tag_name": tag_name, "amount": amount},
+            timeout=30
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        # HikerAPI может возвращать в разных форматах
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            items = data.get("response", {})
+            if isinstance(items, list):
+                return items
+            if isinstance(items, dict):
+                return items.get("items", [])
+            return data.get("items", [])
+        return []
+
+    def get_tag_info(self, tag_name: str) -> Dict:
+        """Получить информацию о хэштеге (кол-во постов и т.д.)"""
+        r = self.session.get(
+            f"{HIKER_BASE_URL}/tag/by/name",
+            params={"tag_name": tag_name},
+            timeout=30
+        )
+        r.raise_for_status()
+        return r.json()
+
 
 class Parser:
     """Основной парсер — использует HikerAPI вместо прямого логина в Instagram"""
@@ -264,10 +296,40 @@ class Parser:
                     account_id = cursor.fetchone()[0]
 
                 inserted = sum(1 for p in posts if self._insert_post(cursor, account_id, p))
+
+                # Сбор статистики по хэштегам
+                hashtag_stats_count = 0
+                for p in posts:
+                    caption = p.get('caption', '') or ''
+                    hashtags = re.findall(r'#(\w[\wа-яёА-ЯЁ]*)', caption)
+                    if not hashtags:
+                        continue
+                    # Получить post_id из БД
+                    cursor.execute('SELECT id FROM posts WHERE account_id = %s AND post_id = %s',
+                                   (account_id, p['post_id']))
+                    post_row = cursor.fetchone()
+                    if not post_row:
+                        continue
+                    db_post_id = post_row[0]
+                    now = datetime.utcnow().isoformat()
+                    for tag in hashtags:
+                        tag_lower = tag.lower()
+                        try:
+                            cursor.execute('''
+                                INSERT INTO hashtag_stats
+                                (hashtag, post_id, account_id, likes, comments, fetched_at)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                            ''', (tag_lower, db_post_id, account_id,
+                                  p.get('likes', 0), p.get('comments', 0), now))
+                            hashtag_stats_count += 1
+                        except Exception:
+                            pass  # дубликаты игнорируем (нет UNIQUE, но OK)
+
                 conn.commit()
-                logger.info(f"[HIKER] Inserted {inserted} new posts for @{target_username}")
+                logger.info(f"[HIKER] Inserted {inserted} new posts for @{target_username}, "
+                           f"saved {hashtag_stats_count} hashtag stats")
                 log_to_db(self.db_url, target_username, 'SAVE', 'SUCCESS',
-                          f'Inserted {inserted} new posts (fetched {len(posts)})')
+                          f'Inserted {inserted} new posts, {hashtag_stats_count} hashtag stats (fetched {len(posts)})')
             finally:
                 cursor.close()
                 conn.close()
@@ -287,3 +349,56 @@ class Parser:
             logger.error(f"[HIKER] Error: {msg}")
             log_to_db(self.db_url, target_username, 'FETCH', 'ERROR', msg)
             raise Exception(f"Ошибка парсинга @{target_username}: {msg}") from e
+
+    def search_by_hashtag(self, hashtag: str, amount: int = 20) -> List[Dict]:
+        """Глобальный поиск постов по хэштегу через HikerAPI"""
+        log_to_db(self.db_url, f"#{hashtag}", 'HASHTAG_SEARCH', 'INFO',
+                  f'Global hashtag search: #{hashtag}, limit={amount}')
+
+        try:
+            tag_name = hashtag.lstrip('#').strip()
+            medias = self.hiker.get_tag_medias(tag_name, amount)
+
+            if not medias:
+                log_to_db(self.db_url, f"#{hashtag}", 'HASHTAG_SEARCH', 'WARN',
+                          'HikerAPI returned 0 medias for this hashtag')
+                return []
+
+            posts = []
+            for media in medias:
+                caption_raw = media.get('caption') or ''
+                caption = self._parse_caption(caption_raw)
+
+                # Вычисляем "виральность" (лайки + комменты * 2)
+                likes = media.get('like_count', 0) or 0
+                comments = media.get('comment_count', 0) or 0
+                engagement_score = likes + comments * 3
+
+                code = media.get('code') or media.get('shortcode') or ''
+                user = media.get('user') or {}
+
+                post_data = {
+                    'account': user.get('username', ''),
+                    'post_id': str(media.get('pk') or media.get('id') or ''),
+                    'url': f'https://www.instagram.com/p/{code}/' if code else '',
+                    'caption': caption,
+                    'media_type': media.get('media_type', 1),
+                    'likes': likes,
+                    'comments': comments,
+                    'engagement_score': engagement_score,
+                    'fetched_at': datetime.utcnow().isoformat(),
+                }
+                posts.append(post_data)
+
+            # Сортируем по engagement для показа трендовых
+            posts.sort(key=lambda p: p['engagement_score'], reverse=True)
+
+            log_to_db(self.db_url, f"#{hashtag}", 'HASHTAG_SEARCH', 'SUCCESS',
+                      f'Found {len(posts)} posts for #{hashtag}')
+            return posts
+
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            logger.error(f"[HIKER] Hashtag search error: {msg}")
+            log_to_db(self.db_url, f"#{hashtag}", 'HASHTAG_SEARCH', 'ERROR', msg)
+            return []
