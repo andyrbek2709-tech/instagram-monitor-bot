@@ -723,14 +723,50 @@ class TelegramBot:
         return ConversationHandler.END
 
     async def search_youtube_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Начать поиск на YouTube"""
+        """Начать поиск на YouTube — сначала выбор сортировки"""
         query = update.callback_query
         await query.answer()
+
+        keyboard = [
+            [InlineKeyboardButton("📊 По релевантности", callback_data='yt_sort_relevance')],
+            [InlineKeyboardButton("🆕 Свежие", callback_data='yt_sort_date')],
+            [InlineKeyboardButton("🔥 Трендовые", callback_data='yt_sort_trending')],
+            [InlineKeyboardButton("🔙 Назад", callback_data='back')],
+        ]
+
         await query.edit_message_text(
             "📺 *Поиск на YouTube*\n\n"
+            "Выбери режим сортировки:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return SEARCH_YOUTUBE
+
+    async def yt_sort_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Выбрать сортировку и запросить текст поиска"""
+        query = update.callback_query
+        await query.answer()
+
+        sort_map = {
+            'yt_sort_relevance': 'relevance',
+            'yt_sort_date': 'date',
+            'yt_sort_trending': 'trending',
+        }
+        sort_labels = {
+            'relevance': 'по релевантности',
+            'date': 'свежие',
+            'trending': 'трендовые',
+        }
+
+        sort_mode = sort_map.get(query.data, 'relevance')
+        context.user_data['yt_sort'] = sort_mode
+        label = sort_labels.get(sort_mode, 'по релевантности')
+
+        await query.edit_message_text(
+            f"📺 *Поиск на YouTube* — сортировка: {label}\n\n"
             "Отправь поисковый запрос. Например:\n"
             "`грузоперевозки казахстан` или `логистика 2025`\n\n"
-            "Я найду актуальные видео и переведу описание на русский.\n\n"
+            "Я найду видео и переведу описание на русский.\n\n"
             "Отправь /cancel чтобы отменить.",
             parse_mode='Markdown'
         )
@@ -750,57 +786,108 @@ class TelegramBot:
         status_msg = await update.message.reply_text(f"📺 Ищу на YouTube: «{query_text}»...")
 
         try:
-            videos = await asyncio.to_thread(self.media_parser.search, query_text, 8)
+            # Определяем сортировку
+            sort_mode = context.user_data.pop('yt_sort', 'relevance')
+            if sort_mode == 'date':
+                platform = 'ytsearchdate'
+                sort_label = '🆕 свежие'
+            else:
+                platform = 'ytsearch'
+                sort_label = '🔥 трендовые' if sort_mode == 'trending' else '📊 по релевантности'
+
+            # Быстрый поиск через flat-playlist
+            await status_msg.edit_text(f"📺 Ищу на YouTube ({sort_label})...")
+            videos = await asyncio.to_thread(self.media_parser.search, query_text, 8, platform=platform)
+
+            # Для трендовых — сортируем по просмотрам
+            if sort_mode == 'trending' and videos:
+                videos.sort(key=lambda v: v.get('views', 0), reverse=True)
 
             if not videos:
                 await status_msg.edit_text(f"❌ Ничего не найдено по запросу: «{query_text}»")
                 return ConversationHandler.END
 
+            # Загружаем полные данные для топ-5 (чтобы были полные описания)
+            await status_msg.edit_text(f"📺 Загружаю подробную информацию о видео...")
+            enriched = []
+            for i, vid in enumerate(videos[:5]):
+                try:
+                    full = await asyncio.to_thread(self.media_parser.get_video_info, vid['url'])
+                    if full:
+                        enriched.append(full)
+                    else:
+                        enriched.append(vid)
+                except Exception:
+                    enriched.append(vid)
+
             await status_msg.edit_text(
-                f"📺 *Результаты поиска:* «{query_text}»\n"
-                f"Найдено: {len(videos)} видео\n"
-                f"Отправляю каждое ниже 👇",
+                f"📺 *Результаты:* «{query_text}» ({sort_label})\n"
+                f"Найдено: {len(videos)} видео, показываю {len(enriched)} лучших 👇",
                 parse_mode='Markdown'
             )
 
-            for i, vid in enumerate(videos, 1):
+            claude_key = os.getenv('CLAUDE_API_KEY')
+
+            for i, vid in enumerate(enriched, 1):
                 title = vid.get('title', '')
                 channel = vid.get('channel', '')
                 views = vid.get('views', 0)
-                likes = vid.get('likes', 0)
+                likes = vid.get('likes', 0) or 0
                 duration = vid.get('duration_str', '')
                 url = vid.get('url', '')
-                description = vid.get('description', '')
+                description = (vid.get('description') or '')[:800]
+                published = vid.get('published_ago', '')
 
-                # Перевод описания
-                translated = ''
-                claude_key = os.getenv('CLAUDE_API_KEY')
-                if claude_key and description and not self._is_russian(description):
+                # Перевод заголовка и описания на русский (если есть CLAUDE_API_KEY)
+                title_ru = ''
+                desc_ru = ''
+                if claude_key:
                     try:
                         import anthropic
                         client = anthropic.Anthropic(api_key=claude_key)
-                        msg = client.messages.create(
-                            model="claude-haiku-4-5-20251001",
-                            max_tokens=300,
-                            messages=[{"role": "user", "content": (
-                                f"Переведи это описание на русский язык. Только перевод:\n\n{description[:1500]}"
-                            )}]
-                        )
-                        translated = msg.content[0].text.strip()
-                    except Exception:
-                        pass
+                        texts_to_translate = []
+                        if title and not self._is_russian(title):
+                            texts_to_translate.append(f"Заголовок: {title[:300]}")
+                        if description and not self._is_russian(description):
+                            texts_to_translate.append(f"Описание: {description[:800]}")
 
-                text = f"{i}. 📺 *{title}*\n👤 {channel}  ⏱ {duration}\n👁 {views:,}  ♥ {likes:,}"
-                if translated:
-                    text += f"\n\n🔄 *Описание:*\n{translated}"
+                        if texts_to_translate:
+                            prompt = "Переведи следующий текст на русский язык. Сохрани структуру (Заголовок: / Описание:). Только перевод:\n\n" + "\n\n".join(texts_to_translate)
+                            msg = client.messages.create(
+                                model="claude-haiku-4-5-20251001",
+                                max_tokens=500,
+                                messages=[{"role": "user", "content": prompt}]
+                            )
+                            result = msg.content[0].text.strip()
+                            for part in result.split('\n'):
+                                if part.startswith('Заголовок:'):
+                                    title_ru = part[len('Заголовок:'):].strip()
+                                elif part.startswith('Описание:'):
+                                    desc_ru = part[len('Описание:'):].strip()
+                    except Exception as e:
+                        logger.warning(f"Translation error: {e}")
+
+                # Формируем красивый вывод
+                header_title = title_ru if title_ru else title
+                time_str = f" ⏱ {duration}" if duration else ""
+                pub_str = f" 📅 {published}" if published else ""
+
+                text = f"{i}. *{header_title}*{time_str}\n"
+                text += f"👤 {channel} | 👁 {views:,} ♥ {likes:,}{pub_str}"
+
+                if desc_ru:
+                    text += f"\n\n📝 {desc_ru[:600]}"
+                elif description and not desc_ru:
+                    text += f"\n\n📝 {description[:400]}"
+
                 text += f"\n\n🔗 {url}"
 
                 try:
                     await update.effective_chat.send_message(text, parse_mode='Markdown')
                 except Exception:
-                    plain = f"{i}. {title}\n{channel} | {duration}\n👁 {views} ♥ {likes}"
-                    if translated:
-                        plain += f"\n\nОписание:\n{translated}"
+                    plain = f"{i}. {header_title}\n{channel} | 👁 {views} ♥ {likes}"
+                    if desc_ru:
+                        plain += f"\n\n{desc_ru[:600]}"
                     plain += f"\n{url}"
                     await update.effective_chat.send_message(plain)
 
