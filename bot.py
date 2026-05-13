@@ -1849,6 +1849,85 @@ class TelegramBot:
             logger.error(f"handle_instagram_url error: {e}", exc_info=True)
             await msg.edit_text(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
 
+    async def handle_media_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Получить информацию по ссылке YouTube/TikTok через yt-dlp"""
+        text = update.message.text.strip()
+        msg = await update.message.reply_text("⏳ Получаю информацию...")
+
+        if not self.media_parser:
+            await msg.edit_text("❌ MediaParser не доступен (yt-dlp не установлен)")
+            return
+
+        try:
+            info = await asyncio.to_thread(self.media_parser.get_video_info, text)
+            if not info:
+                await msg.edit_text("❌ Не удалось получить информацию по этой ссылке.")
+                return
+
+            title = info.get('title', '')
+            channel = info.get('channel', '')
+            views = info.get('views', 0)
+            likes = info.get('likes', 0) or 0
+            duration = info.get('duration_str', '')
+            description = (info.get('description') or '')[:1000]
+            published = info.get('published_ago', '')
+            platform = info.get('platform', 'video')
+            url = info.get('url', text)
+
+            # Перевод на русский
+            title_ru = ''
+            desc_ru = ''
+            claude_key = os.getenv('CLAUDE_API_KEY')
+            if claude_key and (title or description):
+                try:
+                    import anthropic
+                    client = anthropic.Anthropic(api_key=claude_key)
+                    texts = []
+                    if title and not self._is_russian(title):
+                        texts.append(f"Заголовок: {title[:300]}")
+                    if description and not self._is_russian(description):
+                        texts.append(f"Описание: {description[:1000]}")
+                    if texts:
+                        prompt = "Переведи на русский язык. Сохрани структуру (Заголовок:/Описание:). Только перевод:\n\n" + "\n\n".join(texts)
+                        resp = client.messages.create(
+                            model="claude-haiku-4-5-20251001", max_tokens=600,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+                        result = resp.content[0].text.strip()
+                        for part in result.split('\n'):
+                            if part.startswith('Заголовок:'):
+                                title_ru = part[len('Заголовок:'):].strip()
+                            elif part.startswith('Описание:'):
+                                desc_ru = part[len('Описание:'):].strip()
+                except Exception as e:
+                    logger.warning(f"Translation error: {e}")
+
+            platform_icon = {'youtube': '📺', 'tiktok': '🎵'}.get(platform, '📹')
+            header = title_ru if title_ru else title
+            time_str = f" ⏱ {duration}" if duration else ""
+            pub_str = f" 📅 {published}" if published else ""
+
+            text_out = f"{platform_icon} *{header}*{time_str}\n"
+            text_out += f"👤 {channel} | 👁 {views:,} ♥ {likes:,}{pub_str}"
+            if desc_ru:
+                text_out += f"\n\n📝 {desc_ru[:600]}"
+            elif description:
+                text_out += f"\n\n📝 {description[:400]}"
+            text_out += f"\n\n🔗 {url}"
+
+            try:
+                await msg.edit_text(text_out, parse_mode='Markdown')
+            except Exception:
+                plain = f"{platform_icon} {header}\n{channel} | 👁 {views} ♥ {likes}"
+                if desc_ru:
+                    plain += f"\n\n{desc_ru[:600]}"
+                plain += f"\n{url}"
+                await msg.edit_text(plain)
+
+        except Exception as e:
+            logger.error(f"handle_media_url error: {e}", exc_info=True)
+            await msg.edit_text(f"❌ Ошибка при обработке ссылки: {str(e)[:300]}")
+
     async def analyze_post_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Анализировать пост через Claude по выбранному действию"""
         query = update.callback_query
@@ -2005,12 +2084,21 @@ class TelegramBot:
             CallbackQueryHandler(self.debug_command, pattern='^debug_logs$')
         )
 
-        # Обработчик прямых ссылок на посты Instagram
+        # Обработчик прямых ссылок Instagram
         self.application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND &
                 filters.Regex(r'instagram\.com/(?:p|reel|tv)/'),
                 self.handle_instagram_url
+            )
+        )
+
+        # Обработчик ссылок YouTube/TikTok и других видео
+        self.application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND &
+                filters.Regex(r'(youtube\.com/watch|youtu\.be/|tiktok\.com/@)'),
+                self.handle_media_url
             )
         )
 
