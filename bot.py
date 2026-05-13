@@ -976,6 +976,21 @@ class TelegramBot:
         total_chars = sum(1 for c in text if c.isalpha())
         return total_chars == 0 or (russian_chars / total_chars) > 0.3
 
+    async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Команда /search — попросить отправить ссылку для разбора"""
+        keyboard = [
+            [InlineKeyboardButton("🔗 Разобрать пост по ссылке", callback_data='analyze_url')],
+            [InlineKeyboardButton("📺 YouTube поиск", callback_data='search_youtube')],
+            [InlineKeyboardButton("🔍 Поиск по хэштегу 🌐", callback_data='search_hashtag')],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data='back')],
+        ]
+        await update.message.reply_text(
+            "🔗 *Отправь ссылку* на YouTube, Instagram или TikTok — я разберу.\n\n"
+            "Или выбери действие:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
     async def back_to_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Вернуться в главное меню"""
         query = update.callback_query
@@ -2082,10 +2097,29 @@ class TelegramBot:
         """Настроить приложение Telegram"""
         self.application = Application.builder().token(self.token).build()
 
+        # Установить встроенное меню команд (видно внизу слева)
+        try:
+            import asyncio
+            from telegram import BotCommand
+            cmds = [
+                BotCommand("start", "🏠 Главное меню"),
+                BotCommand("search", "🔗 Разобрать пост/видео по ссылке"),
+                BotCommand("help", "❓ Справка"),
+                BotCommand("debug", "🔍 Логи парсинга"),
+            ]
+            # setMyCommands синхронно через bot
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(self.application.bot.set_my_commands(cmds))
+            loop.close()
+            logger.info("Menu commands set: start, search, help, debug")
+        except Exception as e:
+            logger.warning(f"Could not set menu commands: {e}")
+
         # Обработчики команд
         self.application.add_handler(CommandHandler('start', self.start))
         self.application.add_handler(CommandHandler('help', self.help_command))
         self.application.add_handler(CommandHandler('debug', self.debug_command))
+        self.application.add_handler(CommandHandler('search', self.search_command))
 
         # Обработчик добавления аккаунта
         conv_handler = ConversationHandler(
