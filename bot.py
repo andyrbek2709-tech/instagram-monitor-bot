@@ -2121,9 +2121,18 @@ class TelegramBot:
         conv_handler = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.add_account, pattern='^add_account$')],
             states={
-                ADD_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_account)],
-                SELECT_NUM_POSTS: [CallbackQueryHandler(self.select_num_posts, pattern='^posts_(5|10|20)$')],
-                SELECT_INTERVAL: [CallbackQueryHandler(self.select_interval, pattern='^interval_(1|6|24)$')]
+                ADD_ACCOUNT: [
+                    CallbackQueryHandler(self.back_to_menu, pattern='^back$'),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_account)
+                ],
+                SELECT_NUM_POSTS: [
+                    CallbackQueryHandler(self.back_to_menu, pattern='^back$'),
+                    CallbackQueryHandler(self.select_num_posts, pattern='^posts_(5|10|20)$')
+                ],
+                SELECT_INTERVAL: [
+                    CallbackQueryHandler(self.back_to_menu, pattern='^back$'),
+                    CallbackQueryHandler(self.select_interval, pattern='^interval_(1|6|24)$')
+                ]
             },
             fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
         )
@@ -2133,7 +2142,10 @@ class TelegramBot:
         url_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.analyze_url_start, pattern='^analyze_url$')],
             states={
-                WAIT_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.analyze_url_receive)]
+                WAIT_URL: [
+                    CallbackQueryHandler(self.back_to_menu, pattern='^back$'),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.analyze_url_receive)
+                ]
             },
             fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
         )
