@@ -816,13 +816,14 @@ class TelegramBot:
         await query.answer()
         await query.edit_message_text(
             "🎵 *Поиск в TikTok*\n\n"
-            "Отправь поисковый запрос. Например:\n"
-            "`доставка` или `бизнес идеи`\n\n"
-            "Я найду актуальные видео из TikTok.\n\n"
-            "Отправь /cancel чтобы отменить.",
+            "К сожалению, yt-dlp пока не поддерживает поиск в TikTok :(\n\n"
+            "Но ты можешь попробовать:\n"
+            "• 📺 **YouTube** — нажми кнопку «YouTube поиск»\n"
+            "• 🌐 **Instagram** — нажми «Поиск по хэштегу»\n\n"
+            "TikTok доработаю позже, когда появится нормальный API.",
             parse_mode='Markdown'
         )
-        return SEARCH_TIKTOK
+        return ConversationHandler.END
 
     async def search_tiktok_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Получить запрос и найти в TikTok"""

@@ -36,8 +36,12 @@ class MediaParser:
     def search(self, query: str, max_results: int = 10, platform: str = "ytsearch") -> List[Dict]:
         """Поиск видео по ключевым словам
 
-        platform: ytsearch (YouTube), ttsearch (TikTok) или другие
+        platform: ytsearch (YouTube) — единственный поддерживаемый yt-dlp
         """
+        if platform not in ("ytsearch", "ytsearchdate"):
+            logger.warning(f"Unsupported search platform: {platform}, falling back to ytsearch")
+            platform = "ytsearch"
+
         search_query = f"{platform}{max_results}:{query}"
         try:
             result = subprocess.run(
@@ -96,12 +100,13 @@ class MediaParser:
         return self.search("", max_results=min(max_results, 50))
 
     def search_tiktok(self, query: str, max_results: int = 10) -> List[Dict]:
-        """Поиск в TikTok"""
-        return self.search(query, max_results, platform="ttsearch")
+        """Поиск в TikTok — пока не поддерживается yt-dlp, возвращает пустой список"""
+        logger.warning("TikTok search not supported by yt-dlp, returning empty")
+        return []
 
     def get_tiktok_trending(self, max_results: int = 15) -> List[Dict]:
-        """Трендовые TikTok"""
-        return self.search_tiktok("trending", max_results)
+        """Трендовые TikTok — пока не поддерживается"""
+        return []
 
     @staticmethod
     def _parse_data(data: Dict) -> Dict:
