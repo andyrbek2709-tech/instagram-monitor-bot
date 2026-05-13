@@ -2060,11 +2060,19 @@ class TelegramBot:
         youtube_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.search_youtube_start, pattern='^search_youtube$')],
             states={
-                SEARCH_YOUTUBE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.search_youtube_receive)]
+                SEARCH_YOUTUBE: [
+                    CallbackQueryHandler(self.yt_sort_callback, pattern='^yt_sort_'),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.search_youtube_receive),
+                ]
             },
             fallbacks=[CommandHandler('cancel', self.cancel_conversation)]
         )
         self.application.add_handler(youtube_conv)
+
+        # Кнопки выбора сортировки YouTube
+        self.application.add_handler(
+            CallbackQueryHandler(self.yt_sort_callback, pattern='^yt_sort_')
+        )
 
         # ── TikTok поиск ──
         tiktok_conv = ConversationHandler(
