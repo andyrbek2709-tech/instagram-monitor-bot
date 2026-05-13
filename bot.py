@@ -882,14 +882,18 @@ class TelegramBot:
 
                 text += f"\n\n🔗 {url}"
 
+                # Кнопка "Разобрать через ИИ"
+                keyboard = [[InlineKeyboardButton("🤖 Разобрать через Claude", callback_data=f'av:{url}')]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
                 try:
-                    await update.effective_chat.send_message(text, parse_mode='Markdown')
+                    await update.effective_chat.send_message(text, parse_mode='Markdown', reply_markup=reply_markup)
                 except Exception:
                     plain = f"{i}. {header_title}\n{channel} | 👁 {views} ♥ {likes}"
                     if desc_ru:
                         plain += f"\n\n{desc_ru[:600]}"
                     plain += f"\n{url}"
-                    await update.effective_chat.send_message(plain)
+                    await update.effective_chat.send_message(plain, reply_markup=reply_markup)
 
         except Exception as e:
             logger.error(f"YouTube search error: {e}", exc_info=True)
@@ -1795,6 +1799,75 @@ class TelegramBot:
             logger.error(f"create_prompt_action error: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Ошибка генерации промпта: {str(e)[:200]}")
 
+    async def analyze_video_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Разобрать видео/пост по URL через Claude (кнопка 🤖 Разобрать)"""
+        query = update.callback_query
+        await query.answer()
+
+        url = query.data[3:]  # убираем "av:"
+        await query.edit_message_text(f"🤖 Анализирую...")
+
+        try:
+            # Получаем информацию через yt-dlp
+            info = await asyncio.to_thread(self.media_parser.get_video_info, url) if self.media_parser else None
+            if not info:
+                await query.edit_message_text("❌ Не удалось получить информацию о видео.")
+                return
+
+            title = info.get('title', '')
+            description = (info.get('description') or '')[:2000]
+            channel = info.get('channel', '')
+            views = info.get('views', 0)
+            likes = info.get('likes', 0) or 0
+
+            content_for_analysis = f"Заголовок: {title}\n\nОписание: {description}\n\nКанал: {channel}\nПросмотров: {views}\nЛайков: {likes}"
+
+            # Анализ через Claude
+            claude_key = os.getenv('CLAUDE_API_KEY')
+            if not claude_key:
+                await query.edit_message_text("❌ CLAUDE_API_KEY не задан — анализ недоступен.")
+                return
+
+            import anthropic
+            client = anthropic.Anthropic(api_key=claude_key)
+
+            # Проверяем, нужен ли перевод
+            needs_translation = not self._is_russian(title + description)
+
+            prompt = (
+                "Ты анализируешь контент из интернета (YouTube/TikTok/Instagram). "
+                "Ответь на русском языке в формате:\n\n"
+                "СУТЬ:\n[2-3 предложения — о чём это видео/пост]\n\n"
+                "КЛЮЧЕВЫЕ ИДЕИ:\n[3-5 тезисов через •]\n\n"
+                "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2-3 конкретные идеи как использовать]\n\n"
+                f"---\n{content_for_analysis[:2500]}"
+            )
+
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            result = msg.content[0].text.strip()
+
+            context.user_data['last_analysis'] = result
+            context.user_data['last_raw_content'] = content_for_analysis
+
+            keyboard = [
+                [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt')],
+                [InlineKeyboardButton("🔗 Открыть", url=url)],
+            ]
+
+            await query.edit_message_text(
+                f"📊 *Анализ:*\n\n{result}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+
+        except Exception as e:
+            logger.error(f"analyze_video_action error: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка анализа: {str(e)[:300]}")
+
     async def handle_instagram_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Получить пост по ссылке Instagram и показать содержимое"""
         text = update.message.text.strip()
@@ -1915,8 +1988,11 @@ class TelegramBot:
                 text_out += f"\n\n📝 {description[:400]}"
             text_out += f"\n\n🔗 {url}"
 
+            keyboard = [[InlineKeyboardButton("🤖 Разобрать через Claude", callback_data=f'av:{url}')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
             try:
-                await msg.edit_text(text_out, parse_mode='Markdown')
+                await msg.edit_text(text_out, parse_mode='Markdown', reply_markup=reply_markup)
             except Exception:
                 plain = f"{platform_icon} {header}\n{channel} | 👁 {views} ♥ {likes}"
                 if desc_ru:
@@ -2111,6 +2187,11 @@ class TelegramBot:
         # Создать промпт для реализации
         self.application.add_handler(
             CallbackQueryHandler(self.create_prompt_action, pattern='^create_prompt$')
+        )
+
+        # ── Универсальный анализ видео по URL (кнопка 🤖 Разобрать) ──
+        self.application.add_handler(
+            CallbackQueryHandler(self.analyze_video_action, pattern='^av:')
         )
 
         # ── Хэндлеры для хэштегов ──
