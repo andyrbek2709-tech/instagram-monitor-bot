@@ -164,6 +164,7 @@ class MediaParser:
         duration = data.get("duration") or 0
         duration_str = ""
         if duration > 0:
+            duration = int(duration)
             minutes = duration // 60
             seconds = duration % 60
             if minutes >= 60:
