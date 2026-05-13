@@ -2093,27 +2093,23 @@ class TelegramBot:
             logger.error(f"analyze_post_action error: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Ошибка Claude: {str(e)[:300]}")
 
-    def setup(self) -> Application:
-        """Настроить приложение Telegram"""
-        self.application = Application.builder().token(self.token).build()
-
-        # Установить встроенное меню команд (видно внизу слева)
+    async def _set_bot_commands(self) -> None:
+        """Установить меню команд бота (вызывается фоном после старта)"""
         try:
-            import asyncio
             from telegram import BotCommand
-            cmds = [
+            await self.application.bot.set_my_commands([
                 BotCommand("start", "🏠 Главное меню"),
                 BotCommand("search", "🔗 Разобрать пост/видео по ссылке"),
                 BotCommand("help", "❓ Справка"),
                 BotCommand("debug", "🔍 Логи парсинга"),
-            ]
-            # setMyCommands синхронно через bot
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(self.application.bot.set_my_commands(cmds))
-            loop.close()
-            logger.info("Menu commands set: start, search, help, debug")
+            ])
+            logger.info("Menu commands set")
         except Exception as e:
             logger.warning(f"Could not set menu commands: {e}")
+
+    def setup(self) -> Application:
+        """Настроить приложение Telegram"""
+        self.application = Application.builder().token(self.token).build()
 
         # Обработчики команд
         self.application.add_handler(CommandHandler('start', self.start))
