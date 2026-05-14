@@ -1038,9 +1038,17 @@ class TelegramBot:
             try:
                 await status_msg.edit_text(raw_text, parse_mode='Markdown')
             except Exception:
-                await update.effective_chat.send_message(
-                    f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{display_link}"
-                )
+                fb_lines = [
+                    f"Пост {'@' + account if account else ''}",
+                    "",
+                    cap_display or "(нет текста)",
+                    "",
+                    f"❤️ {likes}  💬 {comments}",
+                    display_link,
+                ]
+                if post.get('is_carousel') or len(slides) > 1:
+                    fb_lines.extend(["", f"Карусель: {len(slides)} слайд(ов)"])
+                await update.effective_chat.send_message("\n".join(fb_lines))
 
             gemini_key = os.getenv('GEMINI_API_KEY')
 
@@ -1112,7 +1120,8 @@ class TelegramBot:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
-                        "⚠️ В этом посте нет текста и не удалось получить превью видео.",
+                        "⚠️ Нет текста и не удалось получить картинку превью (карусель или API). "
+                        "Проверь деплой последней версии бота и HikerAPI.",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     return ConversationHandler.END
