@@ -4,7 +4,7 @@ import psycopg2
 import logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-import anthropic
+import google.generativeai as genai
 import time
 
 logger = logging.getLogger(__name__)
@@ -43,27 +43,30 @@ AUDIENCE_SEGMENTS = [
 class TextAnalyzer:
     """Анализ текста постов"""
 
-    def __init__(self, claude_api_key: str):
-        self.client = anthropic.Anthropic(api_key=claude_api_key)
+    def __init__(self, gemini_api_key: str):
+        genai.configure(api_key=gemini_api_key)
+        self.model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
 
     def analyze_sentiment(self, text: str) -> Tuple[str, float]:
-        """Анализировать sentiment через Claude Haiku с retry"""
+        """Анализировать sentiment через Gemini Flash с retry"""
         for attempt in range(MAX_RETRIES):
             try:
-                message = self.client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=100,
-                    messages=[{
-                        "role": "user",
-                        "content": f"""Analyze sentiment of this text:
+                response = self.model.generate_content(
+                    f"""Analyze sentiment of this text:
 {text}
 
 Return JSON: {{"sentiment": "positive"|"negative"|"neutral", "confidence": 0.0-1.0}}
 Only JSON, no other text."""
-                    }]
                 )
 
-                result_text = message.content[0].text.strip()
+                result_text = response.text.strip()
+                # Remove markdown code blocks if present
+                if result_text.startswith('```'):
+                    result_text = result_text.split('```')[1]
+                    if result_text.startswith('json'):
+                        result_text = result_text[4:]
+                    result_text = result_text.strip()
+                
                 result = json.loads(result_text)
                 return result.get('sentiment', 'neutral'), result.get('confidence', 0.5)
             except (json.JSONDecodeError, KeyError, AttributeError) as e:
@@ -242,9 +245,9 @@ class InsightGenerator:
 class Analyzer:
     """Основной анализатор"""
 
-    def __init__(self, db_url: str, claude_api_key: str):
+    def __init__(self, db_url: str, gemini_api_key: str):
         self.db_url = db_url
-        self.text_analyzer = TextAnalyzer(claude_api_key)
+        self.text_analyzer = TextAnalyzer(gemini_api_key)
         self.image_analyzer = ImageAnalyzer()
         self.insight_generator = InsightGenerator()
 
