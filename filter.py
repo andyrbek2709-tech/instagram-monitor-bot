@@ -43,40 +43,40 @@ ENGLISH_AD_KEYWORDS = {
 class ContentFilter:
     """Фильтрация контента с двухуровневой классификацией"""
 
-    def __init__(self, openai_api_key: str):
-        openai.api_key = openai_api_key
-        self.openai_client = openai.OpenAI(api_key=openai_api_key)
+    def __init__(self, gemini_api_key: str):
+        openai.api_key = gemini_api_key
+        self.openai_client = openai.OpenAI(api_key=gemini_api_key)
 
-    def _gpt4_quick_classify(self, caption: str) -> Dict[str, bool]:
-        """Быстрая классификация через GPT-4o-mini с retry"""
+    def _gemini_quick_classify(self, caption: str) -> Dict[str, bool]:
+        """Быстрая классификация через Gemini с retry"""
         for attempt in range(MAX_FILTER_RETRIES):
             try:
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model="gemini-1.5",
                     messages=[{
                         "role": "user",
-                        "content": f"""Classify this Instagram caption:
+                        "content": f"""Ты — Gemini. Классифицируй эту подпись Instagram:
 {caption}
 
-Return JSON: {{"is_ad": bool, "is_greeting": bool, "is_personal": bool}}
-Only return the JSON, no other text."""
+Верни JSON: {{"is_ad": bool, "is_greeting": bool, "is_personal": bool}}
+Только JSON, без текста."""
                     }],
-                    temperature=0.3,
-                    max_tokens=50
+                    temperature=0.0,
+                    max_tokens=80
                 )
 
                 result_text = response.choices[0].message.content.strip()
                 return json.loads(result_text)
             except json.JSONDecodeError as e:
-                logger.warning(f"GPT-4o-mini JSON error on attempt {attempt + 1}: {e}")
+                logger.warning(f"Gemini JSON error on attempt {attempt + 1}: {e}")
                 if attempt < MAX_FILTER_RETRIES - 1:
                     time.sleep(FILTER_RETRY_DELAY)
             except Exception as e:
-                logger.warning(f"GPT-4o-mini error on attempt {attempt + 1}: {e}")
+                logger.warning(f"Gemini error on attempt {attempt + 1}: {e}")
                 if attempt < MAX_FILTER_RETRIES - 1:
                     time.sleep(FILTER_RETRY_DELAY)
                 else:
-                    logger.error(f"GPT-4o-mini classification failed after {MAX_FILTER_RETRIES} attempts")
+                    logger.error(f"Gemini classification failed after {MAX_FILTER_RETRIES} attempts")
 
         return {"is_ad": False, "is_greeting": False, "is_personal": False}
 
@@ -102,8 +102,8 @@ Only return the JSON, no other text."""
     def classify_post(self, caption: str) -> Dict[str, any]:
         """Полная классификация поста"""
 
-        # Этап 1: быстрая классификация GPT-4o-mini
-        gpt_result = self._gpt4_quick_classify(caption)
+        # Этап 1: быстрая классификация Gemini
+        gpt_result = self._gemini_quick_classify(caption)
 
         # Этап 2: ключевое слово scoring
         keyword_score = self._keyword_scoring(caption)
@@ -199,9 +199,9 @@ class MetadataAnalyzer:
 class Filter:
     """Основной фильтр для orchestration"""
 
-    def __init__(self, db_url: str, openai_api_key: str):
+    def __init__(self, db_url: str, gemini_api_key: str):
         self.db_url = db_url
-        self.content_filter = ContentFilter(openai_api_key)
+        self.content_filter = ContentFilter(gemini_api_key)
         self.ad_detector = AdDetector()
         self.metadata_analyzer = MetadataAnalyzer()
 
