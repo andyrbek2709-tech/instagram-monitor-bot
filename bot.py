@@ -686,7 +686,7 @@ class TelegramBot:
             if claude_key and caption and not self._is_russian(caption):
                 try:
                     genai.configure(api_key=claude_key)
-                    model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+                    model = genai.GenerativeModel('gemini-2.0-flash')
                     msg = model.generate_content(
                         f"Переведи этот текст на русский язык. Только перевод, без комментариев:\n\n{caption[:1500]}"
                     )
@@ -840,7 +840,7 @@ class TelegramBot:
                 if claude_key:
                     try:
                         genai.configure(api_key=claude_key)
-                        model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+                        model = genai.GenerativeModel('gemini-2.0-flash')
                         texts_to_translate = []
                         if title and not self._is_russian(title):
                             texts_to_translate.append(f"Заголовок: {title[:300]}")
@@ -1522,11 +1522,57 @@ class TelegramBot:
             except Exception:
                 await status_msg.edit_text(f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{url}")
 
-            # Если нет текста — попробовать Gemini Vision по картинкам
+            # Для карусели — всегда читаем текст на слайдах через Gemini Vision
+            carousel_images = post.get('carousel_images') or []
+            if len(carousel_images) > 1:
+                _ck = os.getenv('GEMINI_API_KEY')
+                if _ck:
+                    await update.effective_chat.send_message(
+                        f"🖼 Читаю карусель ({min(len(carousel_images), 4)} слайда/ов) через Gemini Vision..."
+                    )
+                    try:
+                        import requests as _req
+                        import PIL.Image as PILImage
+                        from io import BytesIO
+                        _ih = {
+                            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                            'Referer': 'https://www.instagram.com/',
+                        }
+                        genai.configure(api_key=_ck)
+                        _mc = genai.GenerativeModel('gemini-2.0-flash')
+                        _pil = []
+                        for _iu in carousel_images[:4]:
+                            try:
+                                _r = _req.get(_iu, headers=_ih, timeout=20)
+                                _r.raise_for_status()
+                                _pil.append(PILImage.open(BytesIO(_r.content)))
+                            except Exception:
+                                pass
+                        if _pil:
+                            _vp = (
+                                f"Это карусель из {len(_pil)} слайдов Instagram-поста. "
+                                "Прочитай ВЕСЬ текст с каждого слайда дословно. "
+                                "Если текста мало — опиши содержимое и идею каждого слайда. "
+                                "Ответь на русском языке, структурируй по слайдам."
+                            )
+                            _vr = _mc.generate_content([_vp] + _pil)
+                            slide_text = _vr.text.strip()
+                            try:
+                                await update.effective_chat.send_message(
+                                    f"👁 *Gemini читает слайды:*\n\n{slide_text[:1500]}", parse_mode='Markdown'
+                                )
+                            except Exception:
+                                await update.effective_chat.send_message(f"Gemini читает слайды:\n\n{slide_text[:1500]}")
+                            if caption:
+                                caption = caption + "\n\n[Текст и идеи на слайдах карусели]:\n" + slide_text
+                            else:
+                                caption = "[Текст и идеи на слайдах карусели]:\n" + slide_text
+                    except Exception as _ce:
+                        logger.warning(f"Carousel Vision failed: {_ce}")
+
+            # Если caption всё ещё пуст — Vision по одиночному изображению или видео
             if not caption:
-                carousel_images = post.get('carousel_images') or []
                 thumbnail_url = post.get('thumbnail_url')
-                # Собираем список картинок для анализа (карусель имеет приоритет)
                 images_to_analyze = carousel_images[:4] if carousel_images else ([thumbnail_url] if thumbnail_url else [])
 
                 if not images_to_analyze:
@@ -1590,7 +1636,7 @@ class TelegramBot:
                                 await asyncio.sleep(2)
                                 video_file = await asyncio.to_thread(genai.get_file, video_file.name)
 
-                            gm = genai.GenerativeModel('gemini-1.5-flash')
+                            gm = genai.GenerativeModel('gemini-2.0-flash')
                             resp = await asyncio.to_thread(
                                 gm.generate_content,
                                 [
@@ -1757,7 +1803,7 @@ class TelegramBot:
                 )
 
             genai.configure(api_key=claude_key)
-            model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+            model = genai.GenerativeModel('gemini-2.0-flash')
             result = model.generate_content(prompt).text.strip()
 
             # Сохранить контекст для "Создать промпт"
@@ -1964,7 +2010,7 @@ class TelegramBot:
 
             import google.generativeai as genai
             genai.configure(api_key=claude_key)
-            model = genai.GenerativeModel(model_name="gemini-1.5-flash-exp-0827")
+            model = genai.GenerativeModel(model_name="gemini-2.0-flash")
 
             # Проверяем, нужен ли перевод
             needs_translation = not self._is_russian(title + description)
@@ -2084,7 +2130,7 @@ class TelegramBot:
             if claude_key and (title or description):
                 try:
                     genai.configure(api_key=claude_key)
-                    model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+                    model = genai.GenerativeModel('gemini-2.0-flash')
                     texts = []
                     if title and not self._is_russian(title):
                         texts.append(f"Заголовок: {title[:300]}")
@@ -2176,7 +2222,7 @@ class TelegramBot:
                 return
 
             genai.configure(api_key=claude_key)
-            model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+            model = genai.GenerativeModel('gemini-2.0-flash')
             message = model.generate_content(prompt)
             result = message.text.strip()
 
