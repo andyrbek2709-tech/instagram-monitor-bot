@@ -275,4 +275,3 @@ class Filter:
             conn.close()
 
         return results
-                                          
