@@ -4,7 +4,7 @@ import psycopg2
 import json
 import logging
 import asyncio
-import anthropic
+import google.generativeai as genai
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -682,19 +682,15 @@ class TelegramBot:
 
             # Перевод
             translated = ''
-            claude_key = os.getenv('CLAUDE_API_KEY')
+            claude_key = os.getenv('GEMINI_API_KEY')
             if claude_key and caption and not self._is_russian(caption):
                 try:
-                    import anthropic
-                    client = anthropic.Anthropic(api_key=claude_key)
-                    msg = client.messages.create(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=300,
-                        messages=[{"role": "user", "content": (
-                            f"Переведи этот текст на русский язык. Только перевод, без комментариев:\n\n{caption[:1500]}"
-                        )}]
+                    genai.configure(api_key=claude_key)
+                    model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+                    msg = model.generate_content(
+                        f"Переведи этот текст на русский язык. Только перевод, без комментариев:\n\n{caption[:1500]}"
                     )
-                    translated = msg.content[0].text.strip()
+                    translated = msg.text.strip()
                 except Exception:
                     pass
 
@@ -826,7 +822,7 @@ class TelegramBot:
                 parse_mode='Markdown'
             )
 
-            claude_key = os.getenv('CLAUDE_API_KEY')
+            claude_key = os.getenv('GEMINI_API_KEY')
 
             for i, vid in enumerate(enriched, 1):
                 title = vid.get('title', '')
@@ -838,13 +834,13 @@ class TelegramBot:
                 description = (vid.get('description') or '')[:800]
                 published = vid.get('published_ago', '')
 
-                # Перевод заголовка и описания на русский (если есть CLAUDE_API_KEY)
+                # Перевод заголовка и описания на русский (если есть GEMINI_API_KEY)
                 title_ru = ''
                 desc_ru = ''
                 if claude_key:
                     try:
-                        import anthropic
-                        client = anthropic.Anthropic(api_key=claude_key)
+                        genai.configure(api_key=claude_key)
+                        model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
                         texts_to_translate = []
                         if title and not self._is_russian(title):
                             texts_to_translate.append(f"Заголовок: {title[:300]}")
@@ -853,12 +849,8 @@ class TelegramBot:
 
                         if texts_to_translate:
                             prompt = "Переведи следующий текст на русский язык. Сохрани структуру (Заголовок: / Описание:). Только перевод:\n\n" + "\n\n".join(texts_to_translate)
-                            msg = client.messages.create(
-                                model="claude-haiku-4-5-20251001",
-                                max_tokens=500,
-                                messages=[{"role": "user", "content": prompt}]
-                            )
-                            result = msg.content[0].text.strip()
+                            response = model.generate_content(prompt)
+                            result = response.text.strip()
                             for part in result.split('\n'):
                                 if part.startswith('Заголовок:'):
                                     title_ru = part[len('Заголовок:'):].strip()
@@ -1530,7 +1522,7 @@ class TelegramBot:
             except Exception:
                 await status_msg.edit_text(f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{url}")
 
-            # Если нет текста — попробовать GPT-4o Vision по thumbnail
+            # Если нет текста — попробовать Gemini Vision по thumbnail
             if not caption:
                 thumbnail_url = post.get('thumbnail_url')
                 if not thumbnail_url:
@@ -1542,25 +1534,24 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-                openai_key = os.getenv('OPENAI_API_KEY')
-                if not openai_key:
+                gemini_key = os.getenv('GEMINI_API_KEY')
+                if not gemini_key:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
-                        "⚠️ Пост без текста — нужен OPENAI_API_KEY для анализа видео через GPT-4o Vision.\n"
+                        "⚠️ Пост без текста — нужен GEMINI_API_KEY для анализа видео через Gemini Vision.\\n"
                         "Добавь его в Railway Variables.",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     return ConversationHandler.END
 
-                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через GPT-4o Vision...")
+                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через Gemini Vision...")
 
                 try:
                     import base64
                     import requests as _req
-                    from openai import OpenAI as _OpenAI
 
-                    # Скачать превью сами — Instagram CDN не отдаёт напрямую OpenAI
+                    # Скачать превью сами — Instagram CDN не отдаёт напрямую Gemini
                     img_resp = _req.get(
                         thumbnail_url,
                         headers={
@@ -1574,27 +1565,26 @@ class TelegramBot:
                     img_b64 = base64.b64encode(img_resp.content).decode('utf-8')
                     img_data_uri = f"data:{content_type};base64,{img_b64}"
 
-                    oa_client = _OpenAI(api_key=openai_key)
-                    vision_resp = oa_client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": img_data_uri}},
-                                {"type": "text", "text": (
-                                    "Это превью видео/Reel из Instagram. "
-                                    "Подробно опиши: что показано, кто в кадре, тема, настроение, "
-                                    "о чём вероятно этот видео-пост. Ответь на русском языке."
-                                )}
-                            ]
-                        }],
-                        max_tokens=600
+                    genai.configure(api_key=gemini_key)
+                    model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+                    
+                    # Gemini поддерживает изображения напрямую
+                    import PIL.Image as PILImage
+                    from io import BytesIO
+                    img_pil = PILImage.open(BytesIO(img_resp.content))
+                    
+                    vision_prompt = (
+                        "Это превью видео/Reel из Instagram. "
+                        "Подробно опиши: что показано, кто в кадре, тема, настроение, "
+                        "о чём вероятно этот видео-пост. Ответь на русском языке."
                     )
-                    visual_desc = vision_resp.choices[0].message.content.strip()
-                    logger.info(f"GPT-4o Vision description: {visual_desc[:100]}...")
+                    
+                    vision_resp = model.generate_content([vision_prompt, img_pil])
+                    visual_desc = vision_resp.text.strip()
+                    logger.info(f"Gemini Vision description: {visual_desc[:100]}...")
                     try:
                         await update.effective_chat.send_message(
-                            f"👁 *GPT-4o видит:*\n\n{visual_desc}",
+                            f"👁 *Gemini видит:*\\n\\n{visual_desc}",
                             parse_mode='Markdown'
                         )
                     except Exception:
@@ -1658,12 +1648,12 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-            # Автоматический анализ через Claude
-            await update.effective_chat.send_message("🤖 Разбираю через Claude...")
+            # Автоматический анализ через Gemini
+            await update.effective_chat.send_message("🤖 Разбираю через Gemini...")
 
-            claude_key = os.getenv('CLAUDE_API_KEY')
+            claude_key = os.getenv('GEMINI_API_KEY')
             if not claude_key:
-                await update.effective_chat.send_message("❌ CLAUDE_API_KEY не задан в Railway — анализ недоступен.")
+                await update.effective_chat.send_message("❌ GEMINI_API_KEY не задан в Railway — анализ недоступен.")
                 return ConversationHandler.END
 
             # Выбрать промпт в зависимости от типа контента
@@ -1673,49 +1663,45 @@ class TelegramBot:
             if has_speech and has_visual:
                 # Видео со звуком: речь = суть, визуал = контекст
                 prompt = (
-                    "Ты анализируешь видео-пост из Instagram. У тебя два источника:\n"
-                    "• ВИЗУАЛЬНЫЙ РЯД — что видно в кадре (обстановка, антураж, подача)\n"
-                    "• РЕЧЬ АВТОРА — что он говорит (ГЛАВНЫЙ источник смысла)\n\n"
+                    "Ты анализируешь видео-пост из Instagram. У тебя два источника:\\n"
+                    "• ВИЗУАЛЬНЫЙ РЯД — что видно в кадре (обстановка, антураж, подача)\\n"
+                    "• РЕЧЬ АВТОРА — что он говорит (ГЛАВНЫЙ источник смысла)\\n\\n"
                     "Правило: если визуал и речь о разном — суть берём из РЕЧИ. "
-                    "Визуал упоминаем только как формат/стиль подачи.\n\n"
-                    "Ответь строго в этом формате на русском языке:\n\n"
-                    "ФОРМАТ И СТИЛЬ ПОДАЧИ:\n"
-                    "[1 строка: как снято, кто, где, какой тип контента]\n\n"
-                    "СУТЬ (из речи):\n"
-                    "[2–3 предложения — главная мысль и посыл автора]\n\n"
-                    "КЛЮЧЕВЫЕ ТЕЗИСЫ:\n"
-                    "[3–5 конкретных тезисов из речи автора, через •]\n\n"
-                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n"
-                    "[2–3 конкретные идеи как адаптировать эту тему или формат под себя]\n\n"
-                    f"---\n{caption[:2500]}"
+                    "Визуал упоминаем только как формат/стиль подачи.\\n\\n"
+                    "Ответь строго в этом формате на русском языке:\\n\\n"
+                    "ФОРМАТ И СТИЛЬ ПОДАЧИ:\\n"
+                    "[1 строка: как снято, кто, где, какой тип контента]\\n\\n"
+                    "СУТЬ (из речи):\\n"
+                    "[2–3 предложения — главная мысль и посыл автора]\\n\\n"
+                    "КЛЮЧЕВЫЕ ТЕЗИСЫ:\\n"
+                    "[3–5 конкретных тезисов из речи автора, через •]\\n\\n"
+                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\\n"
+                    "[2–3 конкретные идеи как адаптировать эту тему или формат под себя]\\n\\n"
+                    f"---\\n{caption[:2500]}"
                 )
             elif has_visual:
                 # Видео без речи или речь не распозналась
                 prompt = (
-                    "Это превью видео-поста из Instagram без распознанной речи.\n"
-                    "Ответь на русском языке:\n\n"
-                    "ФОРМАТ И СТИЛЬ:\n[тип контента, подача]\n\n"
-                    "О ЧЁМ ВЕРОЯТНО:\n[гипотеза по визуалу]\n\n"
-                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2–3 идеи]\n\n"
-                    f"---\n{caption[:2000]}"
+                    "Это превью видео-поста из Instagram без распознанной речи.\\n"
+                    "Ответь на русском языке:\\n\\n"
+                    "ФОРМАТ И СТИЛЬ:\\n[тип контента, подача]\\n\\n"
+                    "О ЧЁМ ВЕРОЯТНО:\\n[гипотеза по визуалу]\\n\\n"
+                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\\n[2–3 идеи]\\n\\n"
+                    f"---\\n{caption[:2000]}"
                 )
             else:
                 # Обычный текстовый пост
                 prompt = (
-                    "Это пост из Instagram. Ответь на русском языке:\n\n"
-                    "СУТЬ:\n[2–3 предложения — главная мысль]\n\n"
-                    "КЛЮЧЕВЫЕ ИДЕИ:\n[3–5 тезисов через •]\n\n"
-                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2–3 конкретные идеи]\n\n"
-                    f"---\n{caption[:2000]}"
+                    "Это пост из Instagram. Ответь на русском языке:\\n\\n"
+                    "СУТЬ:\\n[2–3 предложения — главная мысль]\\n\\n"
+                    "КЛЮЧЕВЫЕ ИДЕИ:\\n[3–5 тезисов через •]\\n\\n"
+                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\\n[2–3 конкретные идеи]\\n\\n"
+                    f"---\\n{caption[:2000]}"
                 )
 
-            client = anthropic.Anthropic(api_key=claude_key)
-            message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1000,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            result = message.content[0].text.strip()
+            genai.configure(api_key=claude_key)
+            model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+            result = model.generate_content(prompt).text.strip()
 
             # Сохранить контекст для "Создать промпт"
             context.user_data['last_analysis'] = result
@@ -1763,34 +1749,30 @@ class TelegramBot:
 
         await query.edit_message_text("⚙️ Генерирую промпт для реализации...")
 
-        claude_key = os.getenv('CLAUDE_API_KEY')
+        claude_key = os.getenv('GEMINI_API_KEY')
         if not claude_key:
-            await query.edit_message_text("❌ CLAUDE_API_KEY не задан в Railway")
+            await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
             return
 
         try:
             prompt = (
                 "На основе анализа видео-поста сгенерируй готовый промпт, который пользователь скопирует "
-                "и вставит в чат Claude или ChatGPT для реализации идеи из этого поста.\n\n"
-                "Промпт должен:\n"
-                "1. Содержать весь необходимый контекст (что за идея, откуда взята)\n"
-                "2. Чётко ставить задачу на реализацию (что нужно сделать)\n"
-                "3. Запрашивать: технологический стек, пошаговый план, с чего начать\n"
-                "4. Быть на русском языке\n"
-                "5. Начинаться с фразы: 'Я хочу реализовать следующую идею...'\n\n"
+                "и вставит в чат Claude или ChatGPT для реализации идеи из этого поста.\\n\\n"
+                "Промпт должен:\\n"
+                "1. Содержать весь необходимый контекст (что за идея, откуда взята)\\n"
+                "2. Чётко ставить задачу на реализацию (что нужно сделать)\\n"
+                "3. Запрашивать: технологический стек, пошаговый план, с чего начать\\n"
+                "4. Быть на русском языке\\n"
+                "5. Начинаться с фразы: 'Я хочу реализовать следующую идею...'\\n\\n"
                 "ВАЖНО: выдай ТОЛЬКО сам промпт — без пояснений, без обёрток, "
-                "без 'вот твой промпт:'. Просто текст готового промпта.\n\n"
-                f"Анализ поста:\n{analysis}\n\n"
-                f"Исходный контент:\n{raw_content[:1500]}"
+                "без 'вот твой промпт'. Просто текст готового промпта.\\n\\n"
+                f"Анализ поста:\\n{analysis}\\n\\n"
+                f"Исходный контент:\\n{raw_content[:1500]}"
             )
 
-            client = anthropic.Anthropic(api_key=claude_key)
-            message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            ready_prompt = message.content[0].text.strip()
+            genai.configure(api_key=claude_key)
+            model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+            ready_prompt = model.generate_content(prompt).text.strip()
 
             keyboard = [
                 [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
@@ -1838,32 +1820,28 @@ class TelegramBot:
             content_for_analysis = f"Заголовок: {title}\n\nОписание: {description}\n\nКанал: {channel}\nПросмотров: {views}\nЛайков: {likes}"
 
             # Анализ через Claude
-            claude_key = os.getenv('CLAUDE_API_KEY')
+            claude_key = os.getenv('GEMINI_API_KEY')
             if not claude_key:
-                await query.edit_message_text("❌ CLAUDE_API_KEY не задан — анализ недоступен.")
+                await update.effective_chat.send_message("❌ GEMINI_API_KEY не задан в Railway — анализ недоступен.")
                 return
 
-            import anthropic
-            client = anthropic.Anthropic(api_key=claude_key)
+            import google.generativeai as genai
+            genai.configure(api_key=claude_key)
+            model = genai.GenerativeModel(model_name="gemini-1.5-flash-exp-0827")
 
             # Проверяем, нужен ли перевод
             needs_translation = not self._is_russian(title + description)
 
             prompt = (
                 "Ты анализируешь контент из интернета (YouTube/TikTok/Instagram). "
-                "Ответь на русском языке в формате:\n\n"
-                "СУТЬ:\n[2-3 предложения — о чём это видео/пост]\n\n"
-                "КЛЮЧЕВЫЕ ИДЕИ:\n[3-5 тезисов через •]\n\n"
-                "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2-3 конкретные идеи как использовать]\n\n"
-                f"---\n{content_for_analysis[:2500]}"
+                "Ответь на русском языке в формате:\\n\\n"
+                "СУТЬ:\\n[2-3 предложения — о чём это видео/пост]\\n\\n"
+                "КЛЮЧЕВЫЕ ИДЕИ:\\n[3-5 тезисов через •]\\n\\n"
+                "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\\n[2-3 конкретные идеи как использовать]\\n\\n"
+                f"---\\n{content_for_analysis[:2500]}"
             )
 
-            msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1000,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            result = msg.content[0].text.strip()
+            result = model.generate_content(prompt).text.strip()
 
             context.user_data['last_analysis'] = result
             context.user_data['last_raw_content'] = content_for_analysis
@@ -1965,11 +1943,11 @@ class TelegramBot:
             # Перевод на русский
             title_ru = ''
             desc_ru = ''
-            claude_key = os.getenv('CLAUDE_API_KEY')
+            claude_key = os.getenv('GEMINI_API_KEY')
             if claude_key and (title or description):
                 try:
-                    import anthropic
-                    client = anthropic.Anthropic(api_key=claude_key)
+                    genai.configure(api_key=claude_key)
+                    model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
                     texts = []
                     if title and not self._is_russian(title):
                         texts.append(f"Заголовок: {title[:300]}")
@@ -1977,11 +1955,8 @@ class TelegramBot:
                         texts.append(f"Описание: {description[:1000]}")
                     if texts:
                         prompt = "Переведи на русский язык. Сохрани структуру (Заголовок:/Описание:). Только перевод:\n\n" + "\n\n".join(texts)
-                        resp = client.messages.create(
-                            model="claude-haiku-4-5-20251001", max_tokens=600,
-                            messages=[{"role": "user", "content": prompt}]
-                        )
-                        result = resp.content[0].text.strip()
+                        resp = model.generate_content(prompt)
+                        result = resp.text.strip()
                         for part in result.split('\n'):
                             if part.startswith('Заголовок:'):
                                 title_ru = part[len('Заголовок:'):].strip()
@@ -2055,21 +2030,18 @@ class TelegramBot:
         }
 
         prompt = prompts.get(action, prompts['analyze_summary'])
-        await query.edit_message_text("🤖 Claude думает...")
+        await query.edit_message_text("🤖 Gemini думает...")
 
         try:
-            claude_key = os.getenv('CLAUDE_API_KEY')
+            claude_key = os.getenv('GEMINI_API_KEY')
             if not claude_key:
-                await query.edit_message_text("❌ CLAUDE_API_KEY не задан в Railway")
+                await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
                 return
 
-            client = anthropic.Anthropic(api_key=claude_key)
-            message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            result = message.content[0].text.strip()
+            genai.configure(api_key=claude_key)
+            model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+            message = model.generate_content(prompt)
+            result = message.text.strip()
 
             keyboard = [
                 [InlineKeyboardButton("📝 Резюме", callback_data='analyze_summary'),
