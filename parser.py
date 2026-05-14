@@ -23,10 +23,13 @@ def _unwrap_hiker_media_payload(raw) -> Dict:
     if not isinstance(raw, dict):
         return {}
     data = raw
-    for _ in range(5):
+    for _ in range(8):
         inner = data.get("response")
         if isinstance(inner, dict):
             data = inner
+            continue
+        if isinstance(inner, list) and inner and isinstance(inner[0], dict):
+            data = inner[0]
             continue
         items = data.get("items")
         if isinstance(items, list) and len(items) == 1 and isinstance(items[0], dict):
@@ -37,10 +40,11 @@ def _unwrap_hiker_media_payload(raw) -> Dict:
 
 
 def _carousel_items_from_media(media: Dict) -> List[Dict]:
-    """Список слайдов карусели в формате Instagram (mobile API)."""
-    cm = media.get("carousel_media")
-    if isinstance(cm, list) and cm:
-        return cm
+    """Список слайдов карусели в формате Instagram (mobile API / варианты HikerAPI)."""
+    for key in ("carousel_media", "resources", "carousel_child_media", "children"):
+        cm = media.get(key)
+        if isinstance(cm, list) and cm and isinstance(cm[0], dict):
+            return cm
     esc = media.get("edge_sidecar_to_children") or {}
     edges = esc.get("edges") or []
     out = []
@@ -52,18 +56,34 @@ def _carousel_items_from_media(media: Dict) -> List[Dict]:
     return out
 
 
+def _carousel_items_from_any(raw, media: Dict) -> List[Dict]:
+    """Пробуем найти слайды и в корне JSON, и в уже развёрнутом объекте."""
+    for node in (media, raw if isinstance(raw, dict) else {}):
+        if not isinstance(node, dict):
+            continue
+        items = _carousel_items_from_media(node)
+        if items:
+            return items
+    return []
+
+
 def _slide_image_and_video_urls(slide: Dict) -> tuple:
     """URL превью картинки и видео для одного слайда карусели."""
     image_url = None
-    iv2 = slide.get("image_versions2") or {}
+    iv2 = slide.get("image_versions2") or slide.get("image_versions") or {}
     cands = iv2.get("candidates") or []
-    if cands and isinstance(cands[0], dict):
-        image_url = cands[0].get("url")
+    if cands:
+        c0 = cands[0]
+        if isinstance(c0, dict):
+            image_url = c0.get("url") or c0.get("uri")
+        elif isinstance(c0, str):
+            image_url = c0
     if not image_url:
         image_url = (
             slide.get("display_url")
             or slide.get("thumbnail_url")
             or slide.get("cover_frame_url")
+            or slide.get("display_uri")
         )
     video_url = None
     vv = slide.get("video_versions") or []
@@ -75,7 +95,7 @@ def _slide_image_and_video_urls(slide: Dict) -> tuple:
 
 
 def _parse_img_index_from_url(url: str) -> Optional[int]:
-    """img_index из query (Instagram web): обычно 0 — первый слайд, 1 — второй и т.д."""
+    """img_index из query. В разных клиентах бывает 0-based или 1-based — см. get_post_by_url."""
     try:
         q = parse_qs(urlparse(url).query)
         if "img_index" not in q or not q["img_index"]:
@@ -212,7 +232,7 @@ class Parser:
         if not media:
             return None
 
-        carousel_items = _carousel_items_from_media(media)
+        carousel_items = _carousel_items_from_any(raw, media)
         carousel_slides = []
         carousel_images = []
         for i, slide in enumerate(carousel_items):
@@ -245,6 +265,9 @@ class Parser:
             f"has_thumbnail_url={bool(media.get('thumbnail_url'))}, "
             f"keys={list(media.keys())[:24]}"
         )
+        if (media.get('media_type') == 8 or media.get('carousel_media_count')) and not carousel_slides:
+            rk = list(raw.keys())[:20] if isinstance(raw, dict) else []
+            logger.warning(f"HikerAPI [{code}]: карусель ожидалась, слайдов 0; raw.keys={rk}")
 
         caption_raw = media.get('caption') or ''
         caption = self._parse_caption(caption_raw)
@@ -252,10 +275,14 @@ class Parser:
 
         # Превью/обложка верхнего уровня
         thumbnail_url = None
-        image_versions = media.get('image_versions2') or {}
+        image_versions = media.get('image_versions2') or media.get('image_versions') or {}
         candidates = image_versions.get('candidates') or []
-        if candidates and isinstance(candidates[0], dict):
-            thumbnail_url = candidates[0].get('url')
+        if candidates:
+            c0 = candidates[0]
+            if isinstance(c0, dict):
+                thumbnail_url = c0.get('url') or c0.get('uri')
+            elif isinstance(c0, str):
+                thumbnail_url = c0
         if not thumbnail_url:
             thumbnail_url = (
                 media.get('thumbnail_url')
@@ -271,16 +298,30 @@ class Parser:
         if not video_url:
             video_url = media.get('video_url')
 
-        # Карусель: превью и видео — слайд из img_index в ссылке, иначе первый слайд
+        # Карусель: превью и видео — слайд из img_index, с запасными вариантами (0-based vs 1-based в URL)
         if carousel_slides:
-            idx = focus_slide if focus_slide is not None else 0
-            if idx >= len(carousel_slides):
-                idx = 0
-            focused = carousel_slides[idx]
-            if focused.get('image_url'):
-                thumbnail_url = focused['image_url']
-            if focused.get('video_url'):
-                video_url = focused['video_url']
+            n = len(carousel_slides)
+            raw_v = focus_slide
+            order = []
+            if raw_v is not None:
+                for c in (raw_v, raw_v - 1, raw_v + 1):
+                    if 0 <= c < n and c not in order:
+                        order.append(c)
+            for c in range(n):
+                if c not in order:
+                    order.append(c)
+            thumbnail_url = None
+            video_url = None
+            for j in order:
+                s = carousel_slides[j]
+                if s.get('image_url'):
+                    thumbnail_url = s['image_url']
+                    break
+            for j in order:
+                s = carousel_slides[j]
+                if s.get('video_url'):
+                    video_url = s['video_url']
+                    break
             if not video_url:
                 for s in carousel_slides:
                     if s.get('video_url'):
@@ -290,8 +331,9 @@ class Parser:
                 thumbnail_url = carousel_images[0]
 
         canonical_url = f"https://www.instagram.com/p/{code}/"
-        if focus_slide is not None:
-            canonical_url = f"{canonical_url}?img_index={focus_slide}"
+        qimg = parse_qs(urlparse(url.strip()).query).get("img_index")
+        if qimg and qimg[0]:
+            canonical_url = f"{canonical_url}?img_index={qimg[0]}"
 
         return {
             'post_id': str(media.get('pk') or media.get('id') or ''),
