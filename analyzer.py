@@ -4,7 +4,7 @@ import psycopg2
 import logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-import google.generativeai as genai
+import google.genai as genai
 import time
 
 logger = logging.getLogger(__name__)
@@ -56,12 +56,12 @@ class TextAnalyzer:
 
         for attempt in range(MAX_RETRIES):
             try:
-                genai.configure(api_key=self.gemini_api_key)
-                model = genai.GenerativeModel(
-                    'gemini-2.0-flash',
-                    generation_config=genai.GenerationConfig(temperature=0.0, max_output_tokens=100)
+                client = genai.Client(api_key=self.gemini_api_key)
+                response = client.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=prompt,
+                    config={'temperature': 0.0, 'max_output_tokens': 100}
                 )
-                response = model.generate_content(prompt)
                 result_text = response.text.strip()
                 result = json.loads(result_text)
                 return result.get('sentiment', 'neutral'), result.get('confidence', 0.5)
