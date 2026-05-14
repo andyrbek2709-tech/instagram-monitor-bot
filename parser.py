@@ -290,6 +290,13 @@ class Parser:
 
         caption_raw = media.get('caption') or ''
         caption = self._parse_caption(caption_raw)
+        if not (caption or '').strip():
+            cap_alt = media.get('accessibility_caption') or media.get('title') or ''
+            if isinstance(cap_alt, dict):
+                cap_alt = self._parse_caption(cap_alt)
+            elif not isinstance(cap_alt, str):
+                cap_alt = str(cap_alt) if cap_alt else ''
+            caption = (cap_alt or '').strip()
         user = _as_dict(media.get('user'))
 
         # Превью/обложка верхнего уровня
