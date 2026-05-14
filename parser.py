@@ -39,13 +39,22 @@ def _unwrap_hiker_media_payload(raw) -> Dict:
     return data if isinstance(data, dict) else {}
 
 
+def _as_dict(obj) -> Dict:
+    """Hiker/Instagram иногда отдаёт вместо dict список или None."""
+    if isinstance(obj, dict):
+        return obj
+    return {}
+
+
 def _carousel_items_from_media(media: Dict) -> List[Dict]:
     """Список слайдов карусели в формате Instagram (mobile API / варианты HikerAPI)."""
     for key in ("carousel_media", "resources", "carousel_child_media", "children"):
         cm = media.get(key)
-        if isinstance(cm, list) and cm and isinstance(cm[0], dict):
-            return cm
-    esc = media.get("edge_sidecar_to_children") or {}
+        if isinstance(cm, list) and cm:
+            dict_slides = [x for x in cm if isinstance(x, dict)]
+            if dict_slides:
+                return dict_slides
+    esc = _as_dict(media.get("edge_sidecar_to_children"))
     edges = esc.get("edges") or []
     out = []
     for e in edges:
@@ -69,8 +78,11 @@ def _carousel_items_from_any(raw, media: Dict) -> List[Dict]:
 
 def _slide_image_and_video_urls(slide: Dict) -> tuple:
     """URL превью картинки и видео для одного слайда карусели."""
+    if not isinstance(slide, dict):
+        return None, None
     image_url = None
-    iv2 = slide.get("image_versions2") or slide.get("image_versions") or {}
+    iv2 = slide.get("image_versions2") or slide.get("image_versions")
+    iv2 = _as_dict(iv2)
     cands = iv2.get("candidates") or []
     if cands:
         c0 = cands[0]
@@ -87,6 +99,10 @@ def _slide_image_and_video_urls(slide: Dict) -> tuple:
         )
     video_url = None
     vv = slide.get("video_versions") or []
+    if isinstance(vv, dict):
+        vv = vv.get("versions") or vv.get("items") or []
+    if not isinstance(vv, list):
+        vv = []
     if vv and isinstance(vv[0], dict):
         video_url = vv[0].get("url")
     if not video_url:
@@ -236,6 +252,9 @@ class Parser:
         carousel_slides = []
         carousel_images = []
         for i, slide in enumerate(carousel_items):
+            if not isinstance(slide, dict):
+                logger.warning(f"HikerAPI [{code}]: слайд карусели #{i} не dict, пропуск")
+                continue
             img_u, vid_u = _slide_image_and_video_urls(slide)
             acc = slide.get('accessibility_caption') or ''
             if isinstance(acc, dict):
@@ -271,11 +290,12 @@ class Parser:
 
         caption_raw = media.get('caption') or ''
         caption = self._parse_caption(caption_raw)
-        user = media.get('user') or {}
+        user = _as_dict(media.get('user'))
 
         # Превью/обложка верхнего уровня
         thumbnail_url = None
-        image_versions = media.get('image_versions2') or media.get('image_versions') or {}
+        image_versions = media.get('image_versions2') or media.get('image_versions')
+        image_versions = _as_dict(image_versions)
         candidates = image_versions.get('candidates') or []
         if candidates:
             c0 = candidates[0]
@@ -293,6 +313,10 @@ class Parser:
         # Видео верхнего уровня (не карусель или первое видео в ленте)
         video_url = None
         video_versions = media.get('video_versions') or []
+        if isinstance(video_versions, dict):
+            video_versions = video_versions.get("versions") or []
+        if not isinstance(video_versions, list):
+            video_versions = []
         if video_versions and isinstance(video_versions[0], dict):
             video_url = video_versions[0].get('url')
         if not video_url:
@@ -361,7 +385,13 @@ class Parser:
             return caption_data
         if isinstance(caption_data, dict):
             return caption_data.get('text', '')
-        return ''
+        if isinstance(caption_data, list):
+            parts = []
+            for x in caption_data:
+                t = self._parse_caption(x)
+                if t:
+                    parts.append(t)
+            return '\n'.join(parts)
 
     def _insert_post(self, cursor, account_id: int, post_data: Dict) -> bool:
         """Вставить пост в базу данных"""
