@@ -1730,6 +1730,64 @@ class TelegramBot:
 
         return ConversationHandler.END
 
+    PROMPT_CHANNEL_FILE = "/tmp/prompt_channel_id.txt"
+
+    def _get_prompt_channel_id(self) -> str:
+        """Читает ID канала: сначала файл, потом env."""
+        try:
+            if os.path.exists(self.PROMPT_CHANNEL_FILE):
+                with open(self.PROMPT_CHANNEL_FILE, "r") as f:
+                    val = f.read().strip()
+                    if val:
+                        return val
+        except Exception:
+            pass
+        return os.getenv('PROMPT_CHANNEL_ID', '').strip()
+
+    def _save_prompt_channel_id(self, channel_id: str) -> None:
+        try:
+            with open(self.PROMPT_CHANNEL_FILE, "w") as f:
+                f.write(str(channel_id).strip())
+        except Exception as e:
+            logger.error(f"save prompt channel id failed: {e}")
+
+    async def cmd_setchannel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Установить канал для промптов. Пересли сообщение из канала PROMT_WORLD."""
+        msg = update.message
+        if not msg:
+            return
+
+        # Определить ID канала из пересланного сообщения
+        channel_id = None
+        channel_title = None
+
+        fo = getattr(msg, "forward_origin", None)
+        if fo is not None:
+            chat = getattr(fo, "chat", None)
+            if chat is not None:
+                channel_id = chat.id
+                channel_title = getattr(chat, "title", None) or getattr(chat, "username", None)
+
+        if not channel_id and getattr(msg, "forward_from_chat", None):
+            channel_id = msg.forward_from_chat.id
+            channel_title = getattr(msg.forward_from_chat, "title", None)
+
+        if channel_id:
+            self._save_prompt_channel_id(str(channel_id))
+            await msg.reply_text(
+                f"✅ Канал <b>{channel_title or channel_id}</b> сохранён как цель для промптов.\n"
+                f"ID: <code>{channel_id}</code>\n\n"
+                f"Теперь при нажатии «📝 Создать промпт» результат будет уходить туда.",
+                parse_mode='HTML'
+            )
+        else:
+            await msg.reply_text(
+                "Перешли мне любое сообщение из канала <b>PROMT_WORLD</b> — "
+                "бот автоматически запомнит этот канал.\n\n"
+                "Как переслать: открой канал → зажми любое сообщение → «Переслать» → выбери этого бота.",
+                parse_mode='HTML'
+            )
+
     async def create_prompt_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Сгенерировать готовый промпт для реализации идеи через Claude"""
         query = update.callback_query
@@ -1775,7 +1833,7 @@ class TelegramBot:
             ready_prompt = model.generate_content(prompt).text.strip()
 
             # Отправить промпт в канал PROMT_WORLD если задан
-            prompt_channel_id = os.getenv('PROMPT_CHANNEL_ID', '').strip()
+            prompt_channel_id = self._get_prompt_channel_id()
             channel_sent = False
             if prompt_channel_id:
                 try:
@@ -2110,6 +2168,8 @@ class TelegramBot:
         self.application.add_handler(CommandHandler('help', self.help_command))
         self.application.add_handler(CommandHandler('debug', self.debug_command))
         self.application.add_handler(CommandHandler('search', self.search_command))
+        self.application.add_handler(CommandHandler('setchannel', self.cmd_setchannel))
+        self.application.add_handler(MessageHandler(filters.FORWARDED, self.cmd_setchannel))
 
         # Обработчик добавления аккаунта
         conv_handler = ConversationHandler(
