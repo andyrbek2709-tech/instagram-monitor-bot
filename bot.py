@@ -13,6 +13,7 @@ from telegram.ext import (Application, CommandHandler, MessageHandler, Conversat
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import random
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,40 @@ IG_CDN_HEADERS = {
 }
 
 
+def _gemini_response_text(response) -> str:
+    """Текст ответа google.genai (поле text может отсутствовать)."""
+    t = getattr(response, 'text', None)
+    if t is not None:
+        return (t or '').strip()
+    return str(response or '').strip()
+
+
+def _gemini_generate_with_retry(client, *, model: str, contents, config=None, max_retries: int = 7):
+    """Вызов generate_content с паузами при 429 / quota (карусель даёт много запросов подряд)."""
+    last: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            if config is not None:
+                return client.models.generate_content(
+                    model=model, contents=contents, config=config
+                )
+            return client.models.generate_content(model=model, contents=contents)
+        except Exception as e:
+            last = e
+            el = str(e).lower()
+            if any(x in el for x in ('429', 'resource_exhausted', 'quota', 'rate limit', 'too many')):
+                if attempt < max_retries - 1:
+                    wait = min(120.0, (2 ** attempt) + random.uniform(0.5, 2.5))
+                    logger.warning(
+                        'Gemini rate limit, sleep %.1fs (attempt %s/%s)',
+                        wait, attempt + 1, max_retries,
+                    )
+                    time.sleep(wait)
+                    continue
+            raise
+    raise last  # type: ignore[misc]
+
+
 def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slides: int = 12) -> str:
     """OCR и описание каждого слайда карусели + транскрипт видео-слайдов (Gemini, google.genai)."""
     if not slides or not gemini_key:
@@ -37,6 +72,21 @@ def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slid
     import requests as _req
     import PIL.Image
 
+    slides = [s for s in slides if isinstance(s, dict)]
+    if not slides:
+        return ''
+
+    try:
+        env_cap = int(os.getenv('CAROUSEL_GEMINI_MAX_SLIDES', '8'))
+    except ValueError:
+        env_cap = 8
+    limit = max(1, min(len(slides), env_cap, max_slides))
+
+    try:
+        delay_sec = float(os.getenv('CAROUSEL_GEMINI_DELAY_SEC', '2.5'))
+    except ValueError:
+        delay_sec = 2.5
+
     gemini_client = genai.Client(api_key=gemini_key)
     blocks = []
     vision_prompt = (
@@ -46,10 +96,15 @@ def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slid
         'Ответ на русском. Если текста на кадре нет — первая строка: «Текста на кадре нет».'
     )
 
-    for i, sl in enumerate(slides[:max_slides]):
+    for i, sl in enumerate(slides[:limit]):
         idx = i + 1
         lines = [f'=== Слайд {idx} (из карусели) ===']
-        acc = (sl.get('accessibility_caption') or '').strip()
+        acc = sl.get('accessibility_caption')
+        if isinstance(acc, list):
+            acc = '\n'.join(str(x) for x in acc)
+        elif not isinstance(acc, str):
+            acc = str(acc) if acc else ''
+        acc = (acc or '').strip()
         if acc:
             lines.append(f'Подпись доступности Instagram:\n{acc}')
 
@@ -59,11 +114,13 @@ def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slid
                 img_resp = _req.get(img_url, headers=IG_CDN_HEADERS, timeout=30)
                 img_resp.raise_for_status()
                 img = PIL.Image.open(io.BytesIO(img_resp.content))
-                vision_resp = gemini_client.models.generate_content(
+                vision_resp = _gemini_generate_with_retry(
+                    gemini_client,
                     model='gemini-2.0-flash',
                     contents=[img, vision_prompt],
                 )
-                lines.append('Анализ кадра (OCR + описание):\n' + (vision_resp.text or '').strip())
+                lines.append('Анализ кадра (OCR + описание):\n' + _gemini_response_text(vision_resp))
+                time.sleep(delay_sec)
             except Exception as e:
                 logger.warning(f'Carousel slide {idx} vision failed: {e}')
                 lines.append(f'(не удалось разобрать картинку слайда: {str(e)[:160]})')
@@ -88,7 +145,8 @@ def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slid
                             file=tmp_path,
                             config={'mime_type': 'video/mp4'},
                         )
-                        tr = gemini_client.models.generate_content(
+                        tr = _gemini_generate_with_retry(
+                            gemini_client,
                             model='gemini-2.0-flash',
                             contents=[
                                 uploaded,
@@ -97,9 +155,10 @@ def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slid
                             ],
                         )
                         gemini_client.files.delete(name=uploaded.name)
-                        transcript = (tr.text or '').strip()
+                        transcript = _gemini_response_text(tr)
                         if transcript and transcript.lower() != 'речи нет':
                             lines.append(f'Речь в видео (слайд {idx}):\n{transcript}')
+                        time.sleep(delay_sec)
                     finally:
                         try:
                             _os.unlink(tmp_path)
@@ -1024,7 +1083,7 @@ class TelegramBot:
             account = post.get('account', '')
             likes = post.get('likes', 0)
             comments = post.get('comments', 0)
-            slides = post.get('carousel_slides') or []
+            slides = [s for s in (post.get('carousel_slides') or []) if isinstance(s, dict)]
             display_link = post.get('url') or post.get('source_url') or url
 
             # Показать сырой текст поста
@@ -1155,15 +1214,16 @@ class TelegramBot:
 
                     gemini_client = genai.Client(api_key=gemini_key)
                     img = PIL.Image.open(_io.BytesIO(img_resp.content))
-                    vision_resp = gemini_client.models.generate_content(
+                    vision_resp = _gemini_generate_with_retry(
+                        gemini_client,
                         model='gemini-2.0-flash',
                         contents=[img, (
                             "Это превью видео/Reel из Instagram. "
                             "Подробно опиши: что показано, кто в кадре, тема, настроение, "
                             "о чём вероятно этот видео-пост. Ответь на русском языке."
-                        )]
+                        )],
                     )
-                    visual_desc = vision_resp.text.strip()
+                    visual_desc = _gemini_response_text(vision_resp)
                     logger.info(f"Gemini Vision description: {visual_desc[:100]}...")
                     try:
                         await update.effective_chat.send_message(
@@ -1192,12 +1252,13 @@ class TelegramBot:
                                         file=tmp_path,
                                         config={'mime_type': 'video/mp4'}
                                     )
-                                    transcript_resp = gemini_client.models.generate_content(
+                                    transcript_resp = _gemini_generate_with_retry(
+                                        gemini_client,
                                         model='gemini-2.0-flash',
                                         contents=[uploaded, "Транскрибируй речь из этого видео на русском языке. Если речи нет — напиши 'Речи нет'."]
                                     )
+                                    transcript_text = _gemini_response_text(transcript_resp)
                                     gemini_client.files.delete(name=uploaded.name)
-                                    transcript_text = transcript_resp.text.strip()
                                     if transcript_text and transcript_text.lower() != 'речи нет':
                                         try:
                                             await update.effective_chat.send_message(
@@ -1304,12 +1365,13 @@ class TelegramBot:
 
                 max_tokens = 2048 if is_carousel_prompt else 1000
                 g_client = genai.Client(api_key=gemini_key)
-                response = g_client.models.generate_content(
+                response = _gemini_generate_with_retry(
+                    g_client,
                     model='gemini-2.0-flash',
                     contents=prompt,
                     config={'temperature': 0.2, 'max_output_tokens': max_tokens}
                 )
-                result = response.text.strip()
+                result = _gemini_response_text(response)
 
                 # Сохранить контекст для "Создать промпт"
                 context.user_data['last_analysis'] = result
@@ -1334,7 +1396,15 @@ class TelegramBot:
 
             except Exception as e:
                 logger.error(f"analyze_url_receive error: {e}", exc_info=True)
-                await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
+                el = str(e).lower()
+                if any(x in el for x in ('429', 'resource_exhausted', 'quota')):
+                    await update.effective_chat.send_message(
+                        "❌ Превышен лимит запросов Gemini (429). Подожди 1–2 минуты или проверь квоту в "
+                        "Google AI Studio (aistudio.google.com). Для длинных каруселей в Railway задай переменные "
+                        "CAROUSEL_GEMINI_MAX_SLIDES=4 и CAROUSEL_GEMINI_DELAY_SEC=3."
+                    )
+                else:
+                    await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
 
         except Exception as e:
             logger.error(f"analyze_url_receive outer error: {e}", exc_info=True)
@@ -1383,12 +1453,13 @@ class TelegramBot:
             )
 
             g_client = genai.Client(api_key=gemini_key)
-            response = g_client.models.generate_content(
+            response = _gemini_generate_with_retry(
+                g_client,
                 model='gemini-2.0-flash',
                 contents=prompt,
                 config={'temperature': 0.2, 'max_output_tokens': 800}
             )
-            ready_prompt = response.text.strip()
+            ready_prompt = _gemini_response_text(response)
 
             keyboard = [
                 [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
@@ -1511,12 +1582,13 @@ class TelegramBot:
                 return
 
             g_client = genai.Client(api_key=gemini_key)
-            response = g_client.models.generate_content(
+            response = _gemini_generate_with_retry(
+                g_client,
                 model='gemini-2.0-flash',
                 contents=prompt,
                 config={'temperature': 0.2, 'max_output_tokens': 800}
             )
-            result = response.text.strip()
+            result = _gemini_response_text(response)
 
             keyboard = [
                 [InlineKeyboardButton("📝 Резюме", callback_data='analyze_summary'),
