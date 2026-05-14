@@ -1771,24 +1771,46 @@ class TelegramBot:
             )
 
             genai.configure(api_key=claude_key)
-            model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
+            model = genai.GenerativeModel('gemini-2.0-flash')
             ready_prompt = model.generate_content(prompt).text.strip()
+
+            # Отправить промпт в канал PROMT_WORLD если задан
+            prompt_channel_id = os.getenv('PROMPT_CHANNEL_ID', '').strip()
+            channel_sent = False
+            if prompt_channel_id:
+                try:
+                    post_info = context.user_data.get('last_post', {})
+                    account = post_info.get('account', '')
+                    source_url = post_info.get('url', '')
+                    channel_text = (
+                        f"📌 Промпт из поста @{account}\n"
+                        f"🔗 {source_url}\n\n"
+                        f"{ready_prompt}"
+                    )
+                    await context.bot.send_message(
+                        chat_id=prompt_channel_id,
+                        text=channel_text,
+                    )
+                    channel_sent = True
+                except Exception as ch_err:
+                    logger.warning(f"Не удалось отправить в канал: {ch_err}")
 
             keyboard = [
                 [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
                 [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
             ]
 
+            channel_note = "\n\n✅ _Сохранено в канал PROMT\\_WORLD_" if channel_sent else ""
             header = "📋 *Готовый промпт — скопируй и вставь в Claude:*\n\n"
             try:
                 await query.edit_message_text(
-                    header + ready_prompt,
+                    header + ready_prompt + channel_note,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode='Markdown'
                 )
             except Exception:
                 await query.edit_message_text(
-                    f"Готовый промпт:\n\n{ready_prompt}",
+                    f"Готовый промпт:\n\n{ready_prompt}" + ("\n\n✅ Сохранено в канал PROMT_WORLD" if channel_sent else ""),
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
