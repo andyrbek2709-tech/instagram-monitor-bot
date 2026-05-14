@@ -1068,85 +1068,86 @@ class TelegramBot:
             # Автоматический анализ через Gemini
             await update.effective_chat.send_message("🤖 Разбираю через Gemini...")
 
-gemini_key = os.getenv('GEMINI_API_KEY')
-        if not gemini_key:
-            await update.effective_chat.send_message("❌ GEMINI_API_KEY не задан в Railway — анализ недоступен.")
-                return ConversationHandler.END
-
-            # Выбрать промпт в зависимости от типа контента
-            has_speech = "[Что говорит человек]" in caption
-            has_visual = "[Что видно в кадре]" in caption
-
-            if has_speech and has_visual:
-                # Видео со звуком: речь = суть, визуал = контекст
-                prompt = (
-                    "Ты анализируешь видео-пост из Instagram. У тебя два источника:\n"
-                    "• ВИЗУАЛЬНЫЙ РЯД — что видно в кадре (обстановка, антураж, подача)\n"
-                    "• РЕЧЬ АВТОРА — что он говорит (ГЛАВНЫЙ источник смысла)\n\n"
-                    "Правило: если визуал и речь о разном — суть берём из РЕЧИ. "
-                    "Визуал упоминаем только как формат/стиль подачи.\n\n"
-                    "Ответь строго в этом формате на русском языке:\n\n"
-                    "ФОРМАТ И СТИЛЬ ПОДАЧИ:\n"
-                    "[1 строка: как снято, кто, где, какой тип контента]\n\n"
-                    "СУТЬ (из речи):\n"
-                    "[2–3 предложения — главная мысль и посыл автора]\n\n"
-                    "КЛЮЧЕВЫЕ ТЕЗИСЫ:\n"
-                    "[3–5 конкретных тезисов из речи автора, через •]\n\n"
-                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n"
-                    "[2–3 конкретные идеи как адаптировать эту тему или формат под себя]\n\n"
-                    f"---\n{caption[:2500]}"
-                )
-            elif has_visual:
-                # Видео без речи или речь не распозналась
-                prompt = (
-                    "Это превью видео-поста из Instagram без распознанной речи.\n"
-                    "Ответь на русском языке:\n\n"
-                    "ФОРМАТ И СТИЛЬ:\n[тип контента, подача]\n\n"
-                    "О ЧЁМ ВЕРОЯТНО:\n[гипотеза по визуалу]\n\n"
-                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2–3 идеи]\n\n"
-                    f"---\n{caption[:2000]}"
-                )
-            else:
-                # Обычный текстовый пост
-                prompt = (
-                    "Это пост из Instagram. Ответь на русском языке:\n\n"
-                    "СУТЬ:\n[2–3 предложения — главная мысль]\n\n"
-                    "КЛЮЧЕВЫЕ ИДЕИ:\n[3–5 тезисов через •]\n\n"
-                    "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2–3 конкретные идеи]\n\n"
-                    f"---\n{caption[:2000]}"
-                )
-
-            client = openai.OpenAI(api_key=gemini_key)
-            response = client.chat.completions.create(
-                model="gemini-1.5",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=1000
-            )
-            result = response.choices[0].message.content.strip()
-
-            # Сохранить контекст для "Создать промпт"
-            context.user_data['last_analysis'] = result
-            context.user_data['last_raw_content'] = caption
-
-            keyboard = [
-                [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt')],
-                [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
-                [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
-            ]
             try:
-                await update.effective_chat.send_message(
-                    f"📊 *Анализ:*\n\n{result}",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='Markdown'
-                )
-            except Exception:
-                await update.effective_chat.send_message(
-                    f"Анализ:\n\n{result}",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                gemini_key = os.getenv('GEMINI_API_KEY')
+                if not gemini_key:
+                    await update.effective_chat.send_message("❌ GEMINI_API_KEY не задан в Railway — анализ недоступен.")
+                    return ConversationHandler.END
 
-        except Exception as e:
+                # Выбрать промпт в зависимости от типа контента
+                has_speech = "[Что говорит человек]" in caption
+                has_visual = "[Что видно в кадре]" in caption
+
+                if has_speech and has_visual:
+                    # Видео со звуком: речь = суть, визуал = контекст
+                    prompt = (
+                        "Ты анализируешь видео-пост из Instagram. У тебя два источника:\n"
+                        "• ВИЗУАЛЬНЫЙ РЯД — что видно в кадре (обстановка, антураж, подача)\n"
+                        "• РЕЧЬ АВТОРА — что он говорит (ГЛАВНЫЙ источник смысла)\n\n"
+                        "Правило: если визуал и речь о разном — суть берём из РЕЧИ. "
+                        "Визуал упоминаем только как формат/стиль подачи.\n\n"
+                        "Ответь строго в этом формате на русском языке:\n\n"
+                        "ФОРМАТ И СТИЛЬ ПОДАЧИ:\n"
+                        "[1 строка: как снято, кто, где, какой тип контента]\n\n"
+                        "СУТЬ (из речи):\n"
+                        "[2–3 предложения — главная мысль и посыл автора]\n\n"
+                        "КЛЮЧЕВЫЕ ТЕЗИСЫ:\n"
+                        "[3–5 конкретных тезисов из речи автора, через •]\n\n"
+                        "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n"
+                        "[2–3 конкретные идеи как адаптировать эту тему или формат под себя]\n\n"
+                        f"---\n{caption[:2500]}"
+                    )
+                elif has_visual:
+                    # Видео без речи или речь не распозналась
+                    prompt = (
+                        "Это превью видео-поста из Instagram без распознанной речи.\n"
+                        "Ответь на русском языке:\n\n"
+                        "ФОРМАТ И СТИЛЬ:\n[тип контента, подача]\n\n"
+                        "О ЧЁМ ВЕРОЯТНО:\n[гипотеза по визуалу]\n\n"
+                        "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2–3 идеи]\n\n"
+                        f"---\n{caption[:2000]}"
+                    )
+                else:
+                    # Обычный текстовый пост
+                    prompt = (
+                        "Это пост из Instagram. Ответь на русском языке:\n\n"
+                        "СУТЬ:\n[2–3 предложения — главная мысль]\n\n"
+                        "КЛЮЧЕВЫЕ ИДЕИ:\n[3–5 тезисов через •]\n\n"
+                        "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2–3 конкретные идеи]\n\n"
+                        f"---\n{caption[:2000]}"
+                    )
+
+                client = openai.OpenAI(api_key=gemini_key)
+                response = client.chat.completions.create(
+                    model="gemini-1.5",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=1000
+                )
+                result = response.choices[0].message.content.strip()
+
+                # Сохранить контекст для "Создать промпт"
+                context.user_data['last_analysis'] = result
+                context.user_data['last_raw_content'] = caption
+
+                keyboard = [
+                    [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt')],
+                    [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
+                    [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
+                ]
+                try:
+                    await update.effective_chat.send_message(
+                        f"📊 *Анализ:*\n\n{result}",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    await update.effective_chat.send_message(
+                        f"Анализ:\n\n{result}",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+
+            except Exception as e:
             logger.error(f"analyze_url_receive error: {e}", exc_info=True)
             await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
 
