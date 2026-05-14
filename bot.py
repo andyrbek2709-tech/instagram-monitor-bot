@@ -61,16 +61,109 @@ def _gemini_generate_with_retry(client, *, model: str, contents, config=None, ma
     raise last  # type: ignore[misc]
 
 
-def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slides: int = 12) -> str:
-    """OCR и описание каждого слайда карусели + транскрипт видео-слайдов (Gemini, google.genai)."""
-    if not slides or not gemini_key:
-        return ''
-
+def _carousel_slide_block(sl: Dict, idx: int, gemini_key: str) -> str:
+    """Один слайд карусели: OCR картинки + при необходимости транскрипт видео (синхронно, для to_thread)."""
     import io
     import os as _os
     import tempfile
     import requests as _req
     import PIL.Image
+
+    if not isinstance(sl, dict):
+        return f'=== Слайд {idx} ===\n(некорректные данные слайда)'
+
+    lines = [f'=== Слайд {idx} (из карусели) ===']
+    acc = sl.get('accessibility_caption')
+    if isinstance(acc, list):
+        acc = '\n'.join(str(x) for x in acc)
+    elif not isinstance(acc, str):
+        acc = str(acc) if acc else ''
+    acc = (acc or '').strip()
+    if acc:
+        lines.append(f'Подпись доступности Instagram:\n{acc}')
+
+    try:
+        delay_sec = float(os.getenv('CAROUSEL_GEMINI_DELAY_SEC', '1.2'))
+    except ValueError:
+        delay_sec = 1.2
+
+    vision_prompt = (
+        'Это кадр из карусели Instagram. '
+        '1) Выпиши ВЕСЬ читаемый текст на кадре (OCR), дословно, построчно если нужно. '
+        '2) Два коротких предложения — что изображено и зачем этот кадр в посте. '
+        'Ответ на русском. Если текста на кадре нет — первая строка: «Текста на кадре нет».'
+    )
+
+    gemini_client = genai.Client(api_key=gemini_key)
+    img_url = sl.get('image_url')
+    if img_url:
+        try:
+            img_resp = _req.get(img_url, headers=IG_CDN_HEADERS, timeout=25)
+            img_resp.raise_for_status()
+            img = PIL.Image.open(io.BytesIO(img_resp.content))
+            vision_resp = _gemini_generate_with_retry(
+                gemini_client,
+                model='gemini-2.0-flash',
+                contents=[img, vision_prompt],
+            )
+            lines.append('Анализ кадра (OCR + описание):\n' + _gemini_response_text(vision_resp))
+            time.sleep(delay_sec)
+        except Exception as e:
+            logger.warning(f'Carousel slide {idx} vision failed: {e}')
+            lines.append(f'(не удалось разобрать картинку слайда: {str(e)[:160]})')
+
+    vid_url = sl.get('video_url')
+    try:
+        mt = int(sl.get('media_type', 1) or 1)
+    except (TypeError, ValueError):
+        mt = 1
+    if vid_url and mt == 2:
+        try:
+            head = _req.head(vid_url, headers=IG_CDN_HEADERS, timeout=10)
+            size = int(head.headers.get('content-length', 0))
+            if 0 < size <= 100 * 1024 * 1024:
+                vid_data = _req.get(vid_url, headers=IG_CDN_HEADERS, timeout=75)
+                vid_data.raise_for_status()
+                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_f:
+                    tmp_path = tmp_f.name
+                    tmp_f.write(vid_data.content)
+                try:
+                    uploaded = gemini_client.files.upload(
+                        file=tmp_path,
+                        config={'mime_type': 'video/mp4'},
+                    )
+                    tr = _gemini_generate_with_retry(
+                        gemini_client,
+                        model='gemini-2.0-flash',
+                        contents=[
+                            uploaded,
+                            'Транскрибируй всю речь из видео дословно. Если на другом языке — переведи на русский. '
+                            "Если речи нет — напиши 'Речи нет'.",
+                        ],
+                    )
+                    gemini_client.files.delete(name=uploaded.name)
+                    transcript = _gemini_response_text(tr)
+                    if transcript and transcript.lower() != 'речи нет':
+                        lines.append(f'Речь в видео (слайд {idx}):\n{transcript}')
+                    time.sleep(delay_sec)
+                finally:
+                    try:
+                        _os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            elif size > 100 * 1024 * 1024:
+                lines.append(f'(видео слайда {idx} слишком большое для транскрипции, ~{size // 1024 // 1024} МБ)')
+        except Exception as e:
+            logger.warning(f'Carousel slide {idx} video transcript failed: {e}')
+            lines.append(f'(транскрипт видео слайда недоступен: {str(e)[:120]})')
+
+    return '\n'.join(lines)
+
+
+def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slides: int = 12) -> str:
+    """OCR всех слайдов (для фоновых вызовов). В Telegram-флоу предпочтительнее пошаговый цикл в analyze_url_receive."""
+    if not slides or not gemini_key:
+        return ''
 
     slides = [s for s in slides if isinstance(s, dict)]
     if not slides:
@@ -82,97 +175,8 @@ def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slid
         env_cap = 8
     limit = max(1, min(len(slides), env_cap, max_slides))
 
-    try:
-        delay_sec = float(os.getenv('CAROUSEL_GEMINI_DELAY_SEC', '2.5'))
-    except ValueError:
-        delay_sec = 2.5
-
-    gemini_client = genai.Client(api_key=gemini_key)
-    blocks = []
-    vision_prompt = (
-        'Это кадр из карусели Instagram. '
-        '1) Выпиши ВЕСЬ читаемый текст на кадре (OCR), дословно, построчно если нужно. '
-        '2) Два коротких предложения — что изображено и зачем этот кадр в посте. '
-        'Ответ на русском. Если текста на кадре нет — первая строка: «Текста на кадре нет».'
-    )
-
-    for i, sl in enumerate(slides[:limit]):
-        idx = i + 1
-        lines = [f'=== Слайд {idx} (из карусели) ===']
-        acc = sl.get('accessibility_caption')
-        if isinstance(acc, list):
-            acc = '\n'.join(str(x) for x in acc)
-        elif not isinstance(acc, str):
-            acc = str(acc) if acc else ''
-        acc = (acc or '').strip()
-        if acc:
-            lines.append(f'Подпись доступности Instagram:\n{acc}')
-
-        img_url = sl.get('image_url')
-        if img_url:
-            try:
-                img_resp = _req.get(img_url, headers=IG_CDN_HEADERS, timeout=30)
-                img_resp.raise_for_status()
-                img = PIL.Image.open(io.BytesIO(img_resp.content))
-                vision_resp = _gemini_generate_with_retry(
-                    gemini_client,
-                    model='gemini-2.0-flash',
-                    contents=[img, vision_prompt],
-                )
-                lines.append('Анализ кадра (OCR + описание):\n' + _gemini_response_text(vision_resp))
-                time.sleep(delay_sec)
-            except Exception as e:
-                logger.warning(f'Carousel slide {idx} vision failed: {e}')
-                lines.append(f'(не удалось разобрать картинку слайда: {str(e)[:160]})')
-
-        vid_url = sl.get('video_url')
-        try:
-            mt = int(sl.get('media_type', 1) or 1)
-        except (TypeError, ValueError):
-            mt = 1
-        if vid_url and mt == 2:
-            try:
-                head = _req.head(vid_url, headers=IG_CDN_HEADERS, timeout=12)
-                size = int(head.headers.get('content-length', 0))
-                if 0 < size <= 100 * 1024 * 1024:
-                    vid_data = _req.get(vid_url, headers=IG_CDN_HEADERS, timeout=90)
-                    vid_data.raise_for_status()
-                    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_f:
-                        tmp_path = tmp_f.name
-                        tmp_f.write(vid_data.content)
-                    try:
-                        uploaded = gemini_client.files.upload(
-                            file=tmp_path,
-                            config={'mime_type': 'video/mp4'},
-                        )
-                        tr = _gemini_generate_with_retry(
-                            gemini_client,
-                            model='gemini-2.0-flash',
-                            contents=[
-                                uploaded,
-                                'Транскрибируй всю речь из видео дословно. Если на другом языке — переведи на русский. '
-                                "Если речи нет — напиши 'Речи нет'.",
-                            ],
-                        )
-                        gemini_client.files.delete(name=uploaded.name)
-                        transcript = _gemini_response_text(tr)
-                        if transcript and transcript.lower() != 'речи нет':
-                            lines.append(f'Речь в видео (слайд {idx}):\n{transcript}')
-                        time.sleep(delay_sec)
-                    finally:
-                        try:
-                            _os.unlink(tmp_path)
-                        except OSError:
-                            pass
-                elif size > 100 * 1024 * 1024:
-                    lines.append(f'(видео слайда {idx} слишком большое для транскрипции, ~{size // 1024 // 1024} МБ)')
-            except Exception as e:
-                logger.warning(f'Carousel slide {idx} video transcript failed: {e}')
-                lines.append(f'(транскрипт видео слайда недоступен: {str(e)[:120]})')
-
-        blocks.append('\n'.join(lines))
-
-    return '\n\n'.join(blocks)
+    parts = [_carousel_slide_block(slides[i], i + 1, gemini_key) for i in range(limit)]
+    return '\n\n'.join(parts)
 
 
 class DigestFormatter:
@@ -1151,12 +1155,47 @@ class TelegramBot:
                 )
 
             if slides and gemini_key:
-                await update.effective_chat.send_message(
-                    f"🖼 Разбираю {len(slides)} слайд(ов): OCR с картинок и речь из видео..."
+                try:
+                    env_cap = int(os.getenv('CAROUSEL_GEMINI_MAX_SLIDES', '8'))
+                except ValueError:
+                    env_cap = 8
+                limit = max(1, min(len(slides), env_cap))
+                try:
+                    slide_timeout = float(os.getenv('CAROUSEL_SLIDE_TIMEOUT_SEC', '100'))
+                except ValueError:
+                    slide_timeout = 100.0
+
+                progress_msg = await update.effective_chat.send_message(
+                    f"🖼 Карусель: до {limit} из {len(slides)} слайдов (OCR ~1–2 мин на слайд при лимитах Gemini). "
+                    f"Статус обновляется по ходу…"
                 )
-                carousel_ctx = await asyncio.to_thread(
-                    _build_carousel_slides_context, slides, gemini_key
-                )
+                parts: List[str] = []
+                for i in range(limit):
+                    try:
+                        await progress_msg.edit_text(
+                            f"🖼 Слайд {i + 1}/{limit} — OCR / видео (подождите до ~{int(slide_timeout)} с)…"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        block = await asyncio.wait_for(
+                            asyncio.to_thread(_carousel_slide_block, slides[i], i + 1, gemini_key),
+                            timeout=slide_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        block = (
+                            f"=== Слайд {i + 1} (из карусели) ===\n"
+                            f"(таймаут {int(slide_timeout)} с — пропуск; уменьши карусель или увеличь CAROUSEL_SLIDE_TIMEOUT_SEC)"
+                        )
+                        logger.warning('Carousel slide %s timed out after %ss', i + 1, slide_timeout)
+                    parts.append(block)
+
+                try:
+                    await progress_msg.edit_text(f"✅ Слайды: {limit}/{len(slides)}. Формирую итоговый разбор…")
+                except Exception:
+                    pass
+
+                carousel_ctx = '\n\n'.join(parts)
                 if carousel_ctx:
                     if caption.strip():
                         caption = (
