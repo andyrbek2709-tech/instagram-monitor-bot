@@ -4,7 +4,7 @@ import psycopg2
 import json
 import logging
 import asyncio
-import anthropic
+import openai
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -831,7 +831,7 @@ class TelegramBot:
 *🔗 РАЗОБРАТЬ ПОСТ ПО ССЫЛКЕ*
 ─────────────────
 Нажми кнопку → отправь ссылку на любой пост или Reel.
-Бот покажет текст поста и сделает разбор через Claude:
+Бот покажет текст поста и сделает разбор через Gemini:
 • О чём пост (суть в 1–2 предложениях)
 • Ключевые идеи
 • Как использовать для своего контента
@@ -893,7 +893,7 @@ class TelegramBot:
         return WAIT_URL
 
     async def analyze_url_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Получить ссылку, спарсить пост и автоматически разобрать через Claude"""
+        """Получить ссылку, спарсить пост и автоматически разобрать через Gemini"""
         text = update.message.text.strip()
         match = re.search(r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)', text)
         if not match:
@@ -949,12 +949,12 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-                openai_key = os.getenv('OPENAI_API_KEY')
-                if not openai_key:
+                gemini_key = os.getenv('GEMINI_API_KEY')
+                if not gemini_key:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
-                        "⚠️ Пост без текста — нужен OPENAI_API_KEY для анализа видео через GPT-4o Vision.\n"
+                        "⚠️ Пост без текста — нужен GEMINI_API_KEY для анализа видео через GPT-4o Vision.\n"
                         "Добавь его в Railway Variables.",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
@@ -981,7 +981,7 @@ class TelegramBot:
                     img_b64 = base64.b64encode(img_resp.content).decode('utf-8')
                     img_data_uri = f"data:{content_type};base64,{img_b64}"
 
-                    oa_client = _OpenAI(api_key=openai_key)
+                    oa_client = _OpenAI(api_key=gemini_key)
                     vision_resp = oa_client.chat.completions.create(
                         model="gpt-4o",
                         messages=[{
@@ -1049,7 +1049,7 @@ class TelegramBot:
                             logger.warning(f"Whisper failed: {we}")
                             await update.effective_chat.send_message(f"⚠️ Whisper не смог транскрибировать: {str(we)[:150]}")
 
-                    # Объединить визуальное описание + транскрипцию для Claude
+                    # Объединить визуальное описание + транскрипцию для Gemini
                     if transcript_text:
                         caption = f"[Что видно в кадре]: {visual_desc}\n\n[Что говорит человек]: {transcript_text}"
                     else:
@@ -1065,12 +1065,12 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-            # Автоматический анализ через Claude
-            await update.effective_chat.send_message("🤖 Разбираю через Claude...")
+            # Автоматический анализ через Gemini
+            await update.effective_chat.send_message("🤖 Разбираю через Gemini...")
 
-            claude_key = os.getenv('CLAUDE_API_KEY')
-            if not claude_key:
-                await update.effective_chat.send_message("❌ CLAUDE_API_KEY не задан в Railway — анализ недоступен.")
+gemini_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_key:
+            await update.effective_chat.send_message("❌ GEMINI_API_KEY не задан в Railway — анализ недоступен.")
                 return ConversationHandler.END
 
             # Выбрать промпт в зависимости от типа контента
@@ -1116,13 +1116,14 @@ class TelegramBot:
                     f"---\n{caption[:2000]}"
                 )
 
-            client = anthropic.Anthropic(api_key=claude_key)
-            message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1000,
-                messages=[{"role": "user", "content": prompt}]
+            client = openai.OpenAI(api_key=gemini_key)
+            response = client.chat.completions.create(
+                model="gemini-1.5",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=1000
             )
-            result = message.content[0].text.strip()
+            result = response.choices[0].message.content.strip()
 
             # Сохранить контекст для "Создать промпт"
             context.user_data['last_analysis'] = result
@@ -1152,7 +1153,7 @@ class TelegramBot:
         return ConversationHandler.END
 
     async def create_prompt_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Сгенерировать готовый промпт для реализации идеи через Claude"""
+        """Сгенерировать готовый промпт для реализации идеи через Gemini"""
         query = update.callback_query
         await query.answer()
 
@@ -1170,15 +1171,15 @@ class TelegramBot:
 
         await query.edit_message_text("⚙️ Генерирую промпт для реализации...")
 
-        claude_key = os.getenv('CLAUDE_API_KEY')
-        if not claude_key:
-            await query.edit_message_text("❌ CLAUDE_API_KEY не задан в Railway")
+        gemini_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_key:
+            await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
             return
 
         try:
             prompt = (
                 "На основе анализа видео-поста сгенерируй готовый промпт, который пользователь скопирует "
-                "и вставит в чат Claude или ChatGPT для реализации идеи из этого поста.\n\n"
+                "и вставит в чат Gemini или ChatGPT для реализации идеи из этого поста.\n\n"
                 "Промпт должен:\n"
                 "1. Содержать весь необходимый контекст (что за идея, откуда взята)\n"
                 "2. Чётко ставить задачу на реализацию (что нужно сделать)\n"
@@ -1191,20 +1192,21 @@ class TelegramBot:
                 f"Исходный контент:\n{raw_content[:1500]}"
             )
 
-            client = anthropic.Anthropic(api_key=claude_key)
-            message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}]
+            client = openai.OpenAI(api_key=gemini_key)
+            response = client.chat.completions.create(
+                model="gemini-1.5",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=800
             )
-            ready_prompt = message.content[0].text.strip()
+            ready_prompt = response.choices[0].message.content.strip()
 
             keyboard = [
                 [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
                 [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
             ]
 
-            header = "📋 *Готовый промпт — скопируй и вставь в Claude:*\n\n"
+            header = "📋 *Готовый промпт — скопируй и вставь в Gemini:*\n\n"
             try:
                 await query.edit_message_text(
                     header + ready_prompt,
@@ -1276,7 +1278,7 @@ class TelegramBot:
             await msg.edit_text(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
 
     async def analyze_post_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Анализировать пост через Claude по выбранному действию"""
+        """Анализировать пост через Gemini по выбранному действию"""
         query = update.callback_query
         await query.answer()
 
@@ -1311,21 +1313,22 @@ class TelegramBot:
         }
 
         prompt = prompts.get(action, prompts['analyze_summary'])
-        await query.edit_message_text("🤖 Claude думает...")
+        await query.edit_message_text("🤖 Gemini думает...")
 
         try:
-            claude_key = os.getenv('CLAUDE_API_KEY')
-            if not claude_key:
-                await query.edit_message_text("❌ CLAUDE_API_KEY не задан в Railway")
+            gemini_key = os.getenv('GEMINI_API_KEY')
+            if not gemini_key:
+                await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
                 return
 
-            client = anthropic.Anthropic(api_key=claude_key)
-            message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}]
+            client = openai.OpenAI(api_key=gemini_key)
+            response = client.chat.completions.create(
+                model="gemini-1.5",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=800
             )
-            result = message.content[0].text.strip()
+            result = response.choices[0].message.content.strip()
 
             keyboard = [
                 [InlineKeyboardButton("📝 Резюме", callback_data='analyze_summary'),
@@ -1347,7 +1350,7 @@ class TelegramBot:
 
         except Exception as e:
             logger.error(f"analyze_post_action error: {e}", exc_info=True)
-            await query.edit_message_text(f"❌ Ошибка Claude: {str(e)[:300]}")
+            await query.edit_message_text(f"❌ Ошибка Gemini: {str(e)[:300]}")
 
     def setup(self) -> Application:
         """Настроить приложение Telegram"""
@@ -1440,7 +1443,7 @@ class TelegramBot:
             )
         )
 
-        # Claude-анализ поста (кнопки на inline-сообщении)
+        # Gemini-анализ поста (кнопки на inline-сообщении)
         self.application.add_handler(
             CallbackQueryHandler(self.analyze_post_action,
                                  pattern='^analyze_(summary|ideas|adapt)$')

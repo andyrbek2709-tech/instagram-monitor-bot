@@ -1,4 +1,4 @@
-# CLAUDE.md — Контекст проекта
+# GEMINI.md — Контекст проекта
 
 > Читай этот файл первым. Здесь всё что нужно знать перед тем как трогать код.
 
@@ -6,7 +6,7 @@
 
 ## Что это
 
-Telegram-бот для мониторинга Instagram-аккаунтов и анализа постов через Claude AI + GPT-4o Vision + Whisper.
+Telegram-бот для мониторинга Instagram-аккаунтов и анализа постов через Gemini AI + GPT-4o Vision + Whisper.
 Хостинг: **Railway.app**. БД: **PostgreSQL** (Railway managed). Парсинг: **HikerAPI**.
 
 ---
@@ -29,8 +29,7 @@ Telegram-бот для мониторинга Instagram-аккаунтов и а
 | `DATABASE_URL` | ✅ | PostgreSQL (Railway автоподставляет) |
 | `TELEGRAM_BOT_TOKEN` | ✅ | Токен от @BotFather |
 | `HIKER_API_KEY` | ✅ | HikerAPI — без него парсинг не работает |
-| `CLAUDE_API_KEY` | ⚠️ опционально | Анализ постов + генерация промптов |
-| `OPENAI_API_KEY` | ⚠️ опционально | GPT-4o Vision + Whisper для видео |
+| `GEMINI_API_KEY` | ✅ | API key для Gemini, Vision и Whisper |
 
 ---
 
@@ -40,8 +39,8 @@ Telegram-бот для мониторинга Instagram-аккаунтов и а
 main.py          запуск: validate_environment() → initialize_components() → run_polling()
 bot.py           весь Telegram UI (кнопки, ConversationHandlers, callback handlers)
 parser.py        HikerAPIClient + Parser.monitor_account() + Parser.get_post_by_url()
-filter.py        Filter.process_posts() → GPT-4o-mini классификация контента
-analyzer.py      Analyzer.process_posts() → Claude sentiment + темы + релевантность
+filter.py        Filter.process_posts() → Gemini классификация контента
+analyzer.py      Analyzer.process_posts() → Gemini sentiment + темы + релевантность
 db_init.py       DatabaseInitializer.create_tables() — создаёт таблицы при старте
 validator.py     AccountValidator — только DB-операции (instagrapi удалён)
 maintenance.py   DataMaintenance.run_maintenance() — очистка старых данных
@@ -89,7 +88,7 @@ maintenance.py   DataMaintenance.run_maintenance() — очистка стары
             - Показывает "🎤 Речь в видео: [транскрипт]"
        c. caption = "[Что видно в кадре]: {visual}\n\n[Что говорит человек]: {transcript}"
 
-  4. Claude анализ (claude-haiku-4-5-20251001):
+  4. Gemini анализ (gemini-1.5):
        Промпт выбирается по типу контента:
        - Видео со звуком → приоритет РЕЧИ, визуал = только контекст
          Формат: ФОРМАТ И СТИЛЬ / СУТЬ / КЛЮЧЕВЫЕ ТЕЗИСЫ / ИДЕИ ДЛЯ КОНТЕНТА
@@ -104,9 +103,9 @@ maintenance.py   DataMaintenance.run_maintenance() — очистка стары
   6. При нажатии "📝 Создать промпт":
        create_prompt_action():
        - Берёт last_analysis и last_raw_content из context.user_data
-       - Claude генерирует готовый промпт начинающийся с "Я хочу реализовать..."
+       - Gemini генерирует готовый промпт, готовый к вставке в чат
        - Содержит: контекст идеи + задачу + запрос стека/плана
-       - Пользователь копирует и вставляет в Claude.ai или ChatGPT
+       - Пользователь копирует и вставляет в Gemini.ai или ChatGPT
 ```
 
 ---
@@ -160,7 +159,7 @@ CDN-ссылки Instagram (`scontent-*.cdninstagram.com`) нельзя пере
 на случай спецсимволов в тексте.
 
 **NULL в analyses:**
-Поля `key_topics` / `recommendations` могут быть NULL если CLAUDE_API_KEY не задан.
+Поля `key_topics` / `recommendations` могут быть NULL если GEMINI_API_KEY не задан.
 В `get_digest()` и `daily_digest_job()` везде: `json.loads(x) if x else []`.
 
 **Railway ephemeral filesystem:**
@@ -176,7 +175,7 @@ CDN-ссылки Instagram (`scontent-*.cdninstagram.com`) нельзя пере
 monitored_accounts  — аккаунты на мониторинге
 posts               — спарсенные посты (caption, url, media_type, content_hash)
 filter_results      — GPT-классификация (is_ad, is_greeting, is_personal)
-analyses            — Claude анализ (sentiment, key_topics JSON, relevance_score)
+analyses            — Gemini анализ (sentiment, key_topics JSON, relevance_score)
 daily_stats         — дневная агрегированная статистика
 telegram_users      — пользователи бота
 instagram_sessions  — зарезервировано, не используется
@@ -191,8 +190,8 @@ parse_logs          — логи парсинга, смотреть через /
 - ✅ Разбор поста по прямой ссылке (пост/Reel)
 - ✅ GPT-4o Vision: описание кадра для видео без текста
 - ✅ Whisper: транскрипция речи из видео (лимит 24 МБ)
-- ✅ Claude анализ с умным промптом (речь = суть, визуал = контекст)
-- ✅ Кнопка "Создать промпт" → готовый промпт для копирования в Claude.ai
+- ✅ Gemini анализ с умным промптом (речь = суть, визуал = контекст)
+- ✅ Кнопка "Создать промпт" → готовый промпт для копирования в Gemini.ai
 - ✅ Ежедневный дайджест в 09:00
 - ✅ /debug — логи парсинга из parse_logs
 

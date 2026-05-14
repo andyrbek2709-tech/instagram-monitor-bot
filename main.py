@@ -73,7 +73,7 @@ class InstagramMonitorBotPipeline:
             return False
 
         # Опциональные ключи — предупреждение, но не блокировка
-        optional_vars = ['CLAUDE_API_KEY', 'OPENAI_API_KEY']
+        optional_vars = ['GEMINI_API_KEY']
         for var in optional_vars:
             if not os.getenv(var):
                 logger.warning(f"Optional env var not set: {var} (some analysis features will be degraded)")
@@ -106,8 +106,8 @@ class InstagramMonitorBotPipeline:
 
             # Создать компоненты
             self.parser = Parser(self.db_url)
-            self.filter = Filter(self.db_url, os.getenv('OPENAI_API_KEY'))
-            self.analyzer = Analyzer(self.db_url, os.getenv('CLAUDE_API_KEY'))
+            self.filter = Filter(self.db_url, os.getenv('GEMINI_API_KEY'))
+            self.analyzer = Analyzer(self.db_url, os.getenv('GEMINI_API_KEY'))
             self.telegram_bot = TelegramBot(
                 os.getenv('TELEGRAM_BOT_TOKEN'),
                 self.db_url,
