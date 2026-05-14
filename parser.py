@@ -137,6 +137,13 @@ class Parser:
         if not media:
             return None
 
+        logger.info(f"HikerAPI [{code}]: media_type={media.get('media_type')}, "
+                    f"carousel_count={len(media.get('carousel_media') or [])}, "
+                    f"has_image_versions2={bool(media.get('image_versions2'))}, "
+                    f"has_video_versions={bool(media.get('video_versions'))}, "
+                    f"has_thumbnail_url={bool(media.get('thumbnail_url'))}, "
+                    f"keys={list(media.keys())[:20]}")
+
         caption_raw = media.get('caption') or ''
         caption = self._parse_caption(caption_raw)
         user = media.get('user') or {}
@@ -154,14 +161,13 @@ class Parser:
                 or media.get('cover_frame_url')
             )
 
-        # Извлечь URL видео (для Reels / видео-постов)
+        # Извлечь URL видео — для любого типа (Reel, video, или видео в карусели)
         video_url = None
-        if media.get('media_type') == 2:
-            video_versions = media.get('video_versions') or []
-            if video_versions:
-                video_url = video_versions[0].get('url')
-            if not video_url:
-                video_url = media.get('video_url')
+        video_versions = media.get('video_versions') or []
+        if video_versions:
+            video_url = video_versions[0].get('url')
+        if not video_url:
+            video_url = media.get('video_url')
 
         # Извлечь URLs картинок из карусели (media_type == 8)
         carousel_images = []
@@ -173,9 +179,16 @@ class Parser:
             if slide_candidates:
                 slide_img = slide_candidates[0].get('url')
             if not slide_img:
-                slide_img = slide.get('thumbnail_url') or slide.get('display_url')
+                slide_img = (slide.get('thumbnail_url')
+                             or slide.get('display_url')
+                             or slide.get('cover_frame_url'))
             if slide_img:
                 carousel_images.append(slide_img)
+            # Если слайд — видео и ещё нет video_url — берём его
+            if not video_url:
+                slide_vid = slide.get('video_versions') or []
+                if slide_vid:
+                    video_url = slide_vid[0].get('url')
         # Если карусель и нет thumbnail — берём первый слайд
         if carousel_images and not thumbnail_url:
             thumbnail_url = carousel_images[0]
