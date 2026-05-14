@@ -159,6 +159,33 @@ class DatabaseInitializer:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_parse_logs_created ON parse_logs(created_at DESC)')
 
+            # Таблица hashtag_stats — статистика по хэштегам
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS hashtag_stats (
+                    id SERIAL PRIMARY KEY,
+                    hashtag TEXT NOT NULL,
+                    post_id INTEGER REFERENCES posts(id),
+                    account_id INTEGER REFERENCES monitored_accounts(id),
+                    likes INTEGER DEFAULT 0,
+                    comments INTEGER DEFAULT 0,
+                    fetched_at TIMESTAMP NOT NULL
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_hashtag_stats_hashtag ON hashtag_stats(hashtag)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_hashtag_stats_fetched ON hashtag_stats(fetched_at)')
+
+            # Таблица user_hashtags — собственные хэштеги пользователя для отслеживания
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_hashtags (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    hashtag TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    UNIQUE (user_id, hashtag)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_hashtags_user ON user_hashtags(user_id)')
+
             conn.commit()
             logger.info("Database tables created successfully")
 
@@ -173,7 +200,9 @@ class DatabaseInitializer:
                     'posts',
                     'filter_results',
                     'analyses',
-                    'telegram_users'
+                    'telegram_users',
+                    'hashtag_stats',
+                    'user_hashtags',
                 ]
 
                 cursor.execute(
