@@ -5,7 +5,7 @@ import json
 import time
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-import openai
+import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
@@ -44,28 +44,25 @@ class ContentFilter:
     """Фильтрация контента с двухуровневой классификацией"""
 
     def __init__(self, gemini_api_key: str):
-        openai.api_key = gemini_api_key
-        self.openai_client = openai.OpenAI(api_key=gemini_api_key)
+        self.gemini_api_key = gemini_api_key
 
     def _gemini_quick_classify(self, caption: str) -> Dict[str, bool]:
         """Быстрая классификация через Gemini с retry"""
         for attempt in range(MAX_FILTER_RETRIES):
             try:
-                response = self.openai_client.chat.completions.create(
-                    model="gemini-1.5",
-                    messages=[{
-                        "role": "user",
-                        "content": f"""Ты — Gemini. Классифицируй эту подпись Instagram:
+                genai.configure(api_key=self.gemini_api_key)
+                model = genai.GenerativeModel(
+                    'gemini-2.0-flash',
+                    generation_config=genai.GenerationConfig(temperature=0.0, max_output_tokens=80)
+                )
+                response = model.generate_content(
+                    f"""Ты — Gemini. Классифицируй эту подпись Instagram:
 {caption}
 
 Верни JSON: {{"is_ad": bool, "is_greeting": bool, "is_personal": bool}}
 Только JSON, без текста."""
-                    }],
-                    temperature=0.0,
-                    max_tokens=80
                 )
-
-                result_text = response.choices[0].message.content.strip()
+                result_text = response.text.strip()
                 return json.loads(result_text)
             except json.JSONDecodeError as e:
                 logger.warning(f"Gemini JSON error on attempt {attempt + 1}: {e}")
@@ -278,3 +275,4 @@ class Filter:
             conn.close()
 
         return results
+                                          

@@ -4,7 +4,7 @@ import psycopg2
 import json
 import logging
 import asyncio
-import openai
+import google.generativeai as genai
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -937,7 +937,7 @@ class TelegramBot:
             except Exception:
                 await status_msg.edit_text(f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{url}")
 
-            # Если нет текста — попробовать GPT-4o Vision по thumbnail
+            # Если нет текста — попробовать Gemini Vision по thumbnail
             if not caption:
                 thumbnail_url = post.get('thumbnail_url')
                 if not thumbnail_url:
@@ -954,20 +954,24 @@ class TelegramBot:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
-                        "⚠️ Пост без текста — нужен GEMINI_API_KEY для анализа видео через GPT-4o Vision.\n"
+                        "⚠️ Пост без текста — нужен GEMINI_API_KEY для анализа видео через Gemini Vision.\n"
                         "Добавь его в Railway Variables.",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     return ConversationHandler.END
 
-                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через GPT-4o Vision...")
+                await update.effective_chat.send_message("🎥 Пост без текста — анализирую через Gemini Vision...")
 
                 try:
-                    import base64
+                    import io
                     import requests as _req
-                    from openai import OpenAI as _OpenAI
+                    import PIL.Image
 
-                    # Скачать превью сами — Instagram CDN не отдаёт напрямую OpenAI
+                    # Настроить Gemini
+                    genai.configure(api_key=gemini_key)
+                    vision_model = genai.GenerativeModel('gemini-2.0-flash')
+
+                    # Скачать превью — Instagram CDN требует заголовки
                     img_resp = _req.get(
                         thumbnail_url,
                         headers={
@@ -977,43 +981,32 @@ class TelegramBot:
                         timeout=20
                     )
                     img_resp.raise_for_status()
-                    content_type = img_resp.headers.get('content-type', 'image/jpeg').split(';')[0]
-                    img_b64 = base64.b64encode(img_resp.content).decode('utf-8')
-                    img_data_uri = f"data:{content_type};base64,{img_b64}"
+                    img = PIL.Image.open(io.BytesIO(img_resp.content))
 
-                    oa_client = _OpenAI(api_key=gemini_key)
-                    vision_resp = oa_client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": img_data_uri}},
-                                {"type": "text", "text": (
-                                    "Это превью видео/Reel из Instagram. "
-                                    "Подробно опиши: что показано, кто в кадре, тема, настроение, "
-                                    "о чём вероятно этот видео-пост. Ответь на русском языке."
-                                )}
-                            ]
-                        }],
-                        max_tokens=600
-                    )
-                    visual_desc = vision_resp.choices[0].message.content.strip()
-                    logger.info(f"GPT-4o Vision description: {visual_desc[:100]}...")
+                    vision_resp = vision_model.generate_content([
+                        img,
+                        "Это превью видео/Reel из Instagram. "
+                        "Подробно опиши: что показано, кто в кадре, тема, настроение, "
+                        "о чём вероятно этот видео-пост. Ответь на русском языке."
+                    ])
+                    visual_desc = vision_resp.text.strip()
+                    logger.info(f"Gemini Vision description: {visual_desc[:100]}...")
                     try:
                         await update.effective_chat.send_message(
-                            f"👁 *GPT-4o видит:*\n\n{visual_desc}",
+                            f"👁 *Gemini видит:*\n\n{visual_desc}",
                             parse_mode='Markdown'
                         )
                     except Exception:
-                        await update.effective_chat.send_message(f"GPT-4o видит:\n\n{visual_desc}")
+                        await update.effective_chat.send_message(f"Gemini видит:\n\n{visual_desc}")
 
-                    # Whisper: транскрипция речи из видео
+                    # Gemini Audio: транскрипция речи из видео
                     transcript_text = ''
                     video_url = post.get('video_url')
                     if video_url:
-                        await update.effective_chat.send_message("🎤 Слушаю что говорят в видео (Whisper)...")
+                        await update.effective_chat.send_message("🎤 Слушаю что говорят в видео (Gemini)...")
                         try:
-                            import io
+                            import os as _os
+                            import tempfile
                             ig_headers = {
                                 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
                                 'Referer': 'https://www.instagram.com/',
@@ -1021,16 +1014,31 @@ class TelegramBot:
                             # Проверить размер файла перед скачиванием
                             head = _req.head(video_url, headers=ig_headers, timeout=10)
                             size = int(head.headers.get('content-length', 0))
-                            if 0 < size <= 24 * 1024 * 1024:  # не больше 24 МБ (лимит Whisper 25 МБ)
+                            if 0 < size <= 100 * 1024 * 1024:  # до 100 МБ (Gemini File API)
                                 vid_data = _req.get(video_url, headers=ig_headers, timeout=60)
                                 vid_data.raise_for_status()
-                                audio_buf = io.BytesIO(vid_data.content)
-                                audio_buf.name = "video.mp4"
-                                transcript = oa_client.audio.transcriptions.create(
-                                    model="whisper-1",
-                                    file=audio_buf
-                                )
-                                transcript_text = transcript.text.strip()
+                                # Сохранить во временный файл для Gemini File API
+                                tmp_fd, tmp_path = tempfile.mkstemp(suffix='.mp4')
+                                try:
+                                    with _os.fdopen(tmp_fd, 'wb') as f:
+                                        f.write(vid_data.content)
+                                    video_file = genai.upload_file(tmp_path, mime_type='video/mp4')
+                                    # Подождать обработки файла
+                                    while video_file.state.name == "PROCESSING":
+                                        await asyncio.sleep(3)
+                                        video_file = genai.get_file(video_file.name)
+                                    transcript_resp = vision_model.generate_content([
+                                        video_file,
+                                        "Транскрибируй всю речь из этого видео дословно. "
+                                        "Если речь на другом языке — переведи на русский. "
+                                        "Если речи нет — ответь только словом: ТИШИНА"
+                                    ])
+                                    transcript_text = transcript_resp.text.strip()
+                                    if transcript_text == "ТИШИНА":
+                                        transcript_text = ""
+                                    genai.delete_file(video_file.name)
+                                finally:
+                                    _os.unlink(tmp_path)
                                 if transcript_text:
                                     try:
                                         await update.effective_chat.send_message(
@@ -1046,21 +1054,21 @@ class TelegramBot:
                                     f"⚠️ Видео слишком большое ({size // 1024 // 1024} МБ) — транскрипция пропущена"
                                 )
                         except Exception as we:
-                            logger.warning(f"Whisper failed: {we}")
-                            await update.effective_chat.send_message(f"⚠️ Whisper не смог транскрибировать: {str(we)[:150]}")
+                            logger.warning(f"Gemini audio failed: {we}")
+                            await update.effective_chat.send_message(f"⚠️ Gemini не смог транскрибировать: {str(we)[:150]}")
 
-                    # Объединить визуальное описание + транскрипцию для Gemini
+                    # Объединить визуальное описание + транскрипцию
                     if transcript_text:
                         caption = f"[Что видно в кадре]: {visual_desc}\n\n[Что говорит человек]: {transcript_text}"
                     else:
                         caption = visual_desc
 
                 except Exception as ve:
-                    logger.error(f"GPT-4o Vision error: {ve}", exc_info=True)
+                    logger.error(f"Gemini Vision error: {ve}", exc_info=True)
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
-                        f"❌ GPT-4o Vision не смог проанализировать видео: {str(ve)[:200]}",
+                        f"❌ Gemini Vision не смог проанализировать видео: {str(ve)[:200]}",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     return ConversationHandler.END
@@ -1117,14 +1125,13 @@ class TelegramBot:
                         f"---\n{caption[:2000]}"
                     )
 
-                client = openai.OpenAI(api_key=gemini_key)
-                response = client.chat.completions.create(
-                    model="gemini-1.5",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2,
-                    max_tokens=1000
+                genai.configure(api_key=gemini_key)
+                gemini_model = genai.GenerativeModel(
+                    'gemini-2.0-flash',
+                    generation_config=genai.GenerationConfig(temperature=0.2, max_output_tokens=1000)
                 )
-                result = response.choices[0].message.content.strip()
+                response = gemini_model.generate_content(prompt)
+                result = response.text.strip()
 
                 # Сохранить контекст для "Создать промпт"
                 context.user_data['last_analysis'] = result
@@ -1193,14 +1200,13 @@ class TelegramBot:
                 f"Исходный контент:\n{raw_content[:1500]}"
             )
 
-            client = openai.OpenAI(api_key=gemini_key)
-            response = client.chat.completions.create(
-                model="gemini-1.5",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=800
+            genai.configure(api_key=gemini_key)
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=genai.GenerationConfig(temperature=0.2, max_output_tokens=800)
             )
-            ready_prompt = response.choices[0].message.content.strip()
+            response = gemini_model.generate_content(prompt)
+            ready_prompt = response.text.strip()
 
             keyboard = [
                 [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
@@ -1322,14 +1328,13 @@ class TelegramBot:
                 await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
                 return
 
-            client = openai.OpenAI(api_key=gemini_key)
-            response = client.chat.completions.create(
-                model="gemini-1.5",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=800
+            genai.configure(api_key=gemini_key)
+            gemini_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                generation_config=genai.GenerationConfig(temperature=0.2, max_output_tokens=800)
             )
-            result = response.choices[0].message.content.strip()
+            response = gemini_model.generate_content(prompt)
+            result = response.text.strip()
 
             keyboard = [
                 [InlineKeyboardButton("📝 Резюме", callback_data='analyze_summary'),
@@ -1542,25 +1547,4 @@ class SchedulerManager:
             conn.close()
 
         except Exception as e:
-            logger.error(f"Error in daily_digest_job: {e}")
-
-    def start_scheduler(self) -> None:
-        """Запустить планировщик"""
-        hour, minute = self.scheduled_time
-        trigger = CronTrigger(hour=hour, minute=minute)
-
-        self.scheduler.add_job(
-            self.daily_digest_job,
-            trigger=trigger,
-            id='daily_digest',
-            name='Daily Digest'
-        )
-
-        self.scheduler.start()
-        logger.info(f"AsyncIO Scheduler started. Daily digest at {hour:02d}:{minute:02d}")
-
-    def stop_scheduler(self) -> None:
-        """Остановить планировщик"""
-        if self.scheduler.running:
-            self.scheduler.shutdown()
-            logger.info("Scheduler stopped")
+            logger.error(f"Error in da
