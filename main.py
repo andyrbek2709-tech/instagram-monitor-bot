@@ -106,7 +106,7 @@ class InstagramMonitorBotPipeline:
 
             # Создать компоненты
             self.parser = Parser(self.db_url)
-            self.filter = Filter(self.db_url, os.getenv('OPENAI_API_KEY'))
+            self.filter = Filter(self.db_url, os.getenv('GEMINI_API_KEY'))
             self.analyzer = Analyzer(self.db_url, os.getenv('GEMINI_API_KEY'))
             self.telegram_bot = TelegramBot(
                 os.getenv('TELEGRAM_BOT_TOKEN'),
