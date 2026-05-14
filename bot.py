@@ -1522,10 +1522,14 @@ class TelegramBot:
             except Exception:
                 await status_msg.edit_text(f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{url}")
 
-            # Если нет текста — попробовать Gemini Vision по thumbnail
+            # Если нет текста — попробовать Gemini Vision по картинкам
             if not caption:
+                carousel_images = post.get('carousel_images') or []
                 thumbnail_url = post.get('thumbnail_url')
-                if not thumbnail_url:
+                # Собираем список картинок для анализа (карусель имеет приоритет)
+                images_to_analyze = carousel_images[:4] if carousel_images else ([thumbnail_url] if thumbnail_url else [])
+
+                if not images_to_analyze:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
@@ -1545,50 +1549,62 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через Gemini Vision...")
+                is_carousel = len(carousel_images) > 1
+                media_label = f"карусель ({len(carousel_images)} слайдов)" if is_carousel else "изображение/видео"
+                await update.effective_chat.send_message(
+                    f"🖼 Пост без текста — читаю {media_label} через Gemini Vision..."
+                )
 
                 try:
-                    import base64
                     import requests as _req
-
-                    # Скачать превью сами — Instagram CDN не отдаёт напрямую Gemini
-                    img_resp = _req.get(
-                        thumbnail_url,
-                        headers={
-                            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-                            'Referer': 'https://www.instagram.com/',
-                        },
-                        timeout=20
-                    )
-                    img_resp.raise_for_status()
-                    content_type = img_resp.headers.get('content-type', 'image/jpeg').split(';')[0]
-                    img_b64 = base64.b64encode(img_resp.content).decode('utf-8')
-                    img_data_uri = f"data:{content_type};base64,{img_b64}"
-
-                    genai.configure(api_key=gemini_key)
-                    model = genai.GenerativeModel('gemini-1.5-flash-exp-0827')
-                    
-                    # Gemini поддерживает изображения напрямую
                     import PIL.Image as PILImage
                     from io import BytesIO
-                    img_pil = PILImage.open(BytesIO(img_resp.content))
-                    
-                    vision_prompt = (
-                        "Это превью видео/Reel из Instagram. "
-                        "Подробно опиши: что показано, кто в кадре, тема, настроение, "
-                        "о чём вероятно этот видео-пост. Ответь на русском языке."
-                    )
-                    
-                    vision_resp = model.generate_content([vision_prompt, img_pil])
+
+                    ig_headers = {
+                        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                        'Referer': 'https://www.instagram.com/',
+                    }
+
+                    genai.configure(api_key=gemini_key)
+                    model = genai.GenerativeModel('gemini-2.0-flash')
+
+                    # Скачать и подготовить картинки для Gemini
+                    pil_images = []
+                    for img_url in images_to_analyze:
+                        try:
+                            r = _req.get(img_url, headers=ig_headers, timeout=20)
+                            r.raise_for_status()
+                            pil_images.append(PILImage.open(BytesIO(r.content)))
+                        except Exception as img_err:
+                            logger.warning(f"Не удалось скачать слайд: {img_err}")
+
+                    if not pil_images:
+                        raise Exception("Не удалось загрузить ни одну картинку")
+
+                    if is_carousel:
+                        vision_prompt = (
+                            f"Это карусель из {len(pil_images)} слайдов Instagram-поста. "
+                            "Прочитай весь текст с каждого слайда и выдели главные идеи. "
+                            "Структурируй ответ по слайдам. Ответь на русском языке."
+                        )
+                    else:
+                        vision_prompt = (
+                            "Это изображение/превью из Instagram-поста. "
+                            "Подробно опиши: что показано, тема, идея, о чём этот пост. "
+                            "Ответь на русском языке."
+                        )
+
+                    vision_resp = model.generate_content([vision_prompt] + pil_images)
                     visual_desc = vision_resp.text.strip()
-                    logger.info(f"Gemini Vision description: {visual_desc[:100]}...")
+                    logger.info(f"Gemini Vision result: {visual_desc[:100]}...")
+
                     try:
                         await update.effective_chat.send_message(
-                            f"👁 *Gemini видит:*\\n\\n{visual_desc}",
+                            f"👁 *Gemini читает слайды:*\n\n{visual_desc}",
                             parse_mode='Markdown'
                         )
                     except Exception:
-                        await update.effective_chat.send_message(f"GPT-4o видит:\n\n{visual_desc}")
+                        await update.effective_chat.send_message(f"Gemini читает слайды:\n\n{visual_desc}")
 
                     # Whisper: транскрипция речи из видео
                     transcript_text = ''
@@ -1632,18 +1648,18 @@ class TelegramBot:
                             logger.warning(f"Whisper failed: {we}")
                             await update.effective_chat.send_message(f"⚠️ Whisper не смог транскрибировать: {str(we)[:150]}")
 
-                    # Объединить визуальное описание + транскрипцию для Claude
+                    # Объединить визуальное описание + транскрипцию
                     if transcript_text:
                         caption = f"[Что видно в кадре]: {visual_desc}\n\n[Что говорит человек]: {transcript_text}"
                     else:
-                        caption = visual_desc
+                        caption = f"[Содержимое слайдов/изображения]: {visual_desc}" if is_carousel else visual_desc
 
                 except Exception as ve:
-                    logger.error(f"GPT-4o Vision error: {ve}", exc_info=True)
+                    logger.error(f"Gemini Vision error: {ve}", exc_info=True)
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
-                        f"❌ GPT-4o Vision не смог проанализировать видео: {str(ve)[:200]}",
+                        f"❌ Gemini Vision не смог проанализировать пост: {str(ve)[:200]}",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     return ConversationHandler.END
