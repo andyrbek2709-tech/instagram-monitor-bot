@@ -4,7 +4,7 @@ import psycopg2
 import logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-import openai
+import google.generativeai as genai
 import time
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class TextAnalyzer:
     """Анализ текста постов"""
 
     def __init__(self, gemini_api_key: str):
-        self.client = openai.OpenAI(api_key=gemini_api_key)
+        self.gemini_api_key = gemini_api_key
 
     def analyze_sentiment(self, text: str) -> Tuple[str, float]:
         """Анализировать sentiment через Gemini с retry"""
@@ -56,14 +56,13 @@ class TextAnalyzer:
 
         for attempt in range(MAX_RETRIES):
             try:
-                response = self.client.chat.completions.create(
-                    model="gemini-1.5",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    max_tokens=100
+                genai.configure(api_key=self.gemini_api_key)
+                model = genai.GenerativeModel(
+                    'gemini-2.0-flash',
+                    generation_config=genai.GenerationConfig(temperature=0.0, max_output_tokens=100)
                 )
-
-                result_text = response.choices[0].message.content.strip()
+                response = model.generate_content(prompt)
+                result_text = response.text.strip()
                 result = json.loads(result_text)
                 return result.get('sentiment', 'neutral'), result.get('confidence', 0.5)
             except (json.JSONDecodeError, KeyError, AttributeError) as e:
@@ -353,6 +352,4 @@ class Analyzer:
             conn.commit()
         finally:
             cursor.close()
-            conn.close()
-
-        return results
+      
