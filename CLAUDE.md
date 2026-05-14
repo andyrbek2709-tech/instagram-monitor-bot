@@ -1,13 +1,40 @@
-# GEMINI.md — Контекст проекта
+# CLAUDE.md — Контекст проекта
 
-> Читай этот файл первым. Здесь всё что нужно знать перед тем как трогать код.
+> Читай этот файл **первым**. Здесь всё что нужно знать перед тем как трогать код.
 
 ---
 
 ## Что это
 
-Telegram-бот для мониторинга Instagram-аккаунтов и анализа постов через Gemini AI + GPT-4o Vision + Whisper.
+Telegram-бот для мониторинга Instagram-аккаунтов и анализа постов через **Gemini AI**.
 Хостинг: **Railway.app**. БД: **PostgreSQL** (Railway managed). Парсинг: **HikerAPI**.
+
+---
+
+## Текущий стек AI (актуально на май 2026)
+
+| Задача | Что используется | Пакет |
+|--------|-----------------|-------|
+| Анализ текста постов | Gemini 2.0 Flash | google-genai |
+| Vision (описание кадра видео) | Gemini 2.0 Flash + PIL.Image | google-genai + pillow |
+| Транскрипция речи из видео | Gemini File API (video/mp4) | google-genai |
+| Классификация (реклама/приветствие) | Gemini 2.0 Flash | google-genai |
+| Sentiment анализ | Gemini 2.0 Flash | google-genai |
+
+**Важно:** пакет называется google-genai, НЕ google-generativeai.
+Импорт: import google.genai as genai
+API: genai.Client(api_key=...).models.generate_content(model='gemini-2.0-flash', contents=..., config={...})
+
+**Старый способ (УДАЛЁН, не использовать):**
+
+  # НЕПРАВИЛЬНО — старый deprecated SDK:
+  import google.generativeai as genai
+  genai.configure(api_key=...)
+  model = genai.GenerativeModel('gemini-2.0-flash')
+
+  # НЕПРАВИЛЬНО — openai SDK:
+  import openai
+  openai.OpenAI(api_key=...).chat.completions.create(model="gemini-1.5", ...)
 
 ---
 
@@ -16,197 +43,117 @@ Telegram-бот для мониторинга Instagram-аккаунтов и а
 Проект изначально строился на instagrapi (прямой логин в Instagram).
 **Это не работало** — Railway/AWS IP заблокированы Instagram.
 
-**Текущее решение**: HikerAPI (`https://api.hikerapi.com/v1`) — REST API без прямого логина.
-`instagrapi` удалён из `requirements.txt` и из всего кода.
-`INSTAGRAM_USERNAME` / `INSTAGRAM_PASSWORD` — больше не нужны.
+**Текущее решение**: HikerAPI (https://api.hikerapi.com/v1) — REST API без прямого логина.
+instagrapi удалён из requirements.txt и из всего кода.
+INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD — больше не нужны.
 
 ---
 
 ## Переменные окружения (Railway → Variables)
 
-| Переменная | Обязательна | Назначение |
-|------------|-------------|-----------|
-| `DATABASE_URL` | ✅ | PostgreSQL (Railway автоподставляет) |
-| `TELEGRAM_BOT_TOKEN` | ✅ | Токен от @BotFather |
-| `HIKER_API_KEY` | ✅ | HikerAPI — без него парсинг не работает |
-| `GEMINI_API_KEY` | ✅ | API key для Gemini, Vision и Whisper |
+DATABASE_URL      — PostgreSQL (Railway автоподставляет)
+TELEGRAM_BOT_TOKEN — Токен от @BotFather
+HIKER_API_KEY     — HikerAPI — без него парсинг не работает
+GEMINI_API_KEY    — Один ключ для всего: текст, Vision, File API
 
 ---
 
 ## Архитектура файлов
 
-```
-main.py          запуск: validate_environment() → initialize_components() → run_polling()
-bot.py           весь Telegram UI (кнопки, ConversationHandlers, callback handlers)
-parser.py        HikerAPIClient + Parser.monitor_account() + Parser.get_post_by_url()
-filter.py        Filter.process_posts() → Gemini классификация контента
-analyzer.py      Analyzer.process_posts() → Gemini sentiment + темы + релевантность
-db_init.py       DatabaseInitializer.create_tables() — создаёт таблицы при старте
-validator.py     AccountValidator — только DB-операции (instagrapi удалён)
-maintenance.py   DataMaintenance.run_maintenance() — очистка старых данных
-```
+main.py       — запуск: validate_environment() → initialize_components() → run_polling()
+bot.py        — весь Telegram UI (кнопки, ConversationHandlers, callback handlers)
+parser.py     — HikerAPIClient + Parser.monitor_account() + Parser.get_post_by_url()
+filter.py     — Filter.process_posts() → Gemini классификация контента
+analyzer.py   — Analyzer.process_posts() → Gemini sentiment + темы + релевантность
+db_init.py    — DatabaseInitializer.create_tables() — создаёт таблицы при старте
+validator.py  — AccountValidator — только DB-операции (instagrapi удалён)
+maintenance.py — DataMaintenance.run_maintenance() — очистка старых данных
 
 ---
 
-## Главное меню (порядок кнопок)
+## Флоу: Разобрать пост по ссылке (главная фича)
 
-1. **🔗 Разобрать пост по ссылке** — главная фича (описана ниже)
-2. **🚀 Начать парсинг аккаунта** — парсит добавленные аккаунты
-3. **➕ Добавить аккаунт**
-4. **📋 Мои аккаунты**
-5. **📊 Получить дайджест**
-6. **📈 Статистика**
-7. **⚙️ Настройки**
-8. **❓ Справка**
+1. parser.get_post_by_url(url)
+     → HikerAPI GET /v1/media/by/code?code={shortcode}
+     → извлекает: caption, thumbnail_url, video_url, likes, comments, account
 
----
+2. Если caption пустой (видео без текста):
 
-## Флоу 1: Разобрать пост по ссылке (главная фича)
+   a. Gemini Vision:
+        img_resp = requests.get(thumbnail_url, headers={'User-Agent': 'iPhone...', 'Referer': 'instagram.com'})
+        img = PIL.Image.open(io.BytesIO(img_resp.content))
+        client = genai.Client(api_key=key)
+        resp = client.models.generate_content(model='gemini-2.0-flash', contents=[img, "опиши..."])
+        visual_desc = resp.text.strip()
 
-```
-Кнопка "🔗 Разобрать пост по ссылке"
-→ analyze_url_start() → бот просит прислать ссылку (state: WAIT_URL)
-→ пользователь шлёт https://www.instagram.com/p/... или /reel/...
-→ analyze_url_receive():
+   b. Gemini File API транскрипция:
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
+            f.write(video_bytes); tmp_path = f.name
+        uploaded = client.files.upload(file=tmp_path, config={'mime_type': 'video/mp4'})
+        resp = client.models.generate_content(model='gemini-2.0-flash', contents=[uploaded, "Транскрибируй..."])
+        client.files.delete(name=uploaded.name)
+        os.unlink(tmp_path)
 
-  1. parser.get_post_by_url(url)
-       → HikerAPI GET /v1/media/by/code?code={shortcode}
-       → извлекает: caption, thumbnail_url, video_url, likes, comments, account
+   c. caption = "[Что видно в кадре]: {visual}\n\n[Что говорит человек]: {transcript}"
 
-  2. Показывает карточку поста (текст + лайки + ссылка)
+3. Gemini анализ (промпт по типу контента):
+   - Видео со звуком: приоритет РЕЧИ, визуал = контекст
+   - Видео без звука: анализ по визуалу
+   - Текст: СУТЬ / КЛЮЧЕВЫЕ ИДЕИ / ИДЕИ ДЛЯ КОНТЕНТА
 
-  3. Если caption пустой (видео/Reel без текста):
-       a. GPT-4o Vision:
-            - Скачивает thumbnail с Instagram CDN (requests + User-Agent заголовок)
-            - Кодирует в base64 (Instagram CDN блокирует прямые URL для OpenAI)
-            - Отправляет в gpt-4o как data URI
-            - Показывает "👁 GPT-4o видит: [описание кадра]"
-       b. Whisper транскрипция:
-            - HEAD запрос для проверки размера (лимит 24 МБ)
-            - Скачивает video_url
-            - openai.audio.transcriptions.create(model="whisper-1")
-            - Показывает "🎤 Речь в видео: [транскрипт]"
-       c. caption = "[Что видно в кадре]: {visual}\n\n[Что говорит человек]: {transcript}"
-
-  4. Gemini анализ (gemini-1.5):
-       Промпт выбирается по типу контента:
-       - Видео со звуком → приоритет РЕЧИ, визуал = только контекст
-         Формат: ФОРМАТ И СТИЛЬ / СУТЬ / КЛЮЧЕВЫЕ ТЕЗИСЫ / ИДЕИ ДЛЯ КОНТЕНТА
-       - Видео без звука → анализ по визуалу
-       - Текстовый пост → СУТЬ / КЛЮЧЕВЫЕ ИДЕИ / ИДЕИ ДЛЯ КОНТЕНТА
-
-  5. Показывает анализ с кнопками:
-       [📝 Создать промпт]   ← только по нажатию
-       [🔗 Разобрать другой пост]
-       [🔙 Главное меню]
-
-  6. При нажатии "📝 Создать промпт":
-       create_prompt_action():
-       - Берёт last_analysis и last_raw_content из context.user_data
-       - Gemini генерирует готовый промпт, готовый к вставке в чат
-       - Содержит: контекст идеи + задачу + запрос стека/плана
-       - Пользователь копирует и вставляет в Gemini.ai или ChatGPT
-```
-
----
-
-## Флоу 2: Парсинг аккаунта
-
-```
-Кнопка "🚀 Начать парсинг"
-→ start_parsing():
-  1. Берёт активные аккаунты из monitored_accounts WHERE is_active=1
-  2. parser.monitor_account(username, num_posts):
-       → HikerAPI GET /v1/user/by/username → получает pk
-       → HikerAPI GET /v1/user/medias → список постов
-       → Сохраняет в таблицу posts
-  3. В фоне: filter.process_posts() + analyzer.process_posts() (для статистики в БД)
-  4. Каждый пост — отдельное сообщение: текст подписи + ссылка
-     Если текста нет → "(текст отсутствует — только медиа)"
-```
+4. Кнопка "Создать промпт" → Gemini генерирует готовый промпт начиная с
+   "Я хочу реализовать следующую идею..."
 
 ---
 
 ## ConversationHandler состояния
 
-```python
-ADD_ACCOUNT = 0       # ввод username для добавления аккаунта
+ADD_ACCOUNT = 0
 CONFIRM_ACCOUNT = 1
 SELECT_NUM_POSTS = 2
 SELECT_INTERVAL = 3
-WAIT_SESSIONID = 100  # устаревшее, обработчик есть но ничего не делает
+WAIT_SESSIONID = 100  # устаревшее, можно удалить
 WAIT_URL = 101        # ожидание ссылки Instagram для анализа
-```
 
 ---
 
-## Технические детали
+## История проблем и решений
 
-**Instagram CDN и OpenAI Vision:**
-CDN-ссылки Instagram (`scontent-*.cdninstagram.com`) нельзя передать напрямую в OpenAI —
-возвращает 400 "Error while downloading". Решение: скачиваем сами через `requests` с
-`User-Agent: Mozilla/5.0 (iPhone...)` и `Referer: https://www.instagram.com/`, затем base64.
-
-**HikerAPI форматы ответа:**
-Может вернуть `list`, `dict.items`, `dict.response.items`. Всё обрабатывается в
-`HikerAPIClient.get_user_medias()`.
-
-**Caption может быть dict:**
-`{"text": "..."}` вместо строки. Обрабатывает `Parser._parse_caption()`.
-
-**Telegram 4096 символов:**
-Длинные тексты обрезаются до 800 символов. Везде есть fallback без parse_mode='Markdown'
-на случай спецсимволов в тексте.
-
-**NULL в analyses:**
-Поля `key_topics` / `recommendations` могут быть NULL если GEMINI_API_KEY не задан.
-В `get_digest()` и `daily_digest_job()` везде: `json.loads(x) if x else []`.
-
-**Railway ephemeral filesystem:**
-Ничего нельзя хранить на диске между деплоями. Всё — только PostgreSQL.
-
----
-
-## База данных
-
-Все таблицы создаются автоматически при старте через `db_init.py`.
-
-```
-monitored_accounts  — аккаунты на мониторинге
-posts               — спарсенные посты (caption, url, media_type, content_hash)
-filter_results      — GPT-классификация (is_ad, is_greeting, is_personal)
-analyses            — Gemini анализ (sentiment, key_topics JSON, relevance_score)
-daily_stats         — дневная агрегированная статистика
-telegram_users      — пользователи бота
-instagram_sessions  — зарезервировано, не используется
-parse_logs          — логи парсинга, смотреть через /debug
-```
+ПРОБЛЕМА                                  | РЕШЕНИЕ
+import openai → Railway crash             | Заменено на import google.genai as genai
+google.generativeai deprecated            | Заменено на google-genai
+filter.py — 42 null байта                | Перестроен из git-оригинала
+requirements.txt усечён до psycopg2-bi   | Перезаписан через shell
+bot.py усечён (1550 строк вместо 1566)   | Перестроен из git-оригинала
+IndentationError в analyze_url_receive   | Правильный отступ в except-теле
+Внешний try без except                   | Добавлен except на уровне 8 пробелов
+git index.lock на Windows ФС             | Клонировать в /tmp/bot_fresh, пушить оттуда
+Edit tool на Windows CRLF файлах         | Использовать Python-скрипты для изменений
 
 ---
 
 ## Что работает сейчас
 
-- ✅ Парсинг аккаунтов через HikerAPI, посты в виде отдельных сообщений
-- ✅ Разбор поста по прямой ссылке (пост/Reel)
-- ✅ GPT-4o Vision: описание кадра для видео без текста
-- ✅ Whisper: транскрипция речи из видео (лимит 24 МБ)
-- ✅ Gemini анализ с умным промптом (речь = суть, визуал = контекст)
-- ✅ Кнопка "Создать промпт" → готовый промпт для копирования в Gemini.ai
-- ✅ Ежедневный дайджест в 09:00
-- ✅ /debug — логи парсинга из parse_logs
-
-## Что можно улучшить
-
-- Видео > 24 МБ — Whisper пропускается, только Vision
-- Аккаунты без изоляции по user_id (все видят всех)
-- `WAIT_SESSIONID` ConversationHandler можно удалить (мёртвый код)
-- Нет push-уведомлений о новых постах (только ручной запуск и дайджест 09:00)
+- Парсинг аккаунтов через HikerAPI
+- Разбор поста по прямой ссылке (пост/Reel)
+- Gemini Vision: описание кадра для видео без текста
+- Gemini File API: транскрипция речи из видео (лимит 100 МБ)
+- Gemini анализ с умным промптом
+- Кнопка "Создать промпт" → готовый промпт для Gemini.ai
+- Ежедневный дайджест в 09:00
+- /debug — логи парсинга из parse_logs
 
 ---
 
 ## Деплой
 
-Хостинг: **Railway.app**
-Запуск: `Procfile` → `web: python main.py`
-Каждый push в GitHub → Railway автоматически деплоит (~1-2 мин).
-GitHub: `andyrbek2709-tech/instagram-monitor-bot`
+Хостинг: Railway.app
+Запуск: Procfile → web: python main.py
+Каждый push в GitHub → Railway автоматически деплоит (~1-2 мин)
+GitHub: andyrbek2709-tech/instagram-monitor-bot
+
+Как пушить (если git lock на основной ФС):
+  cd /tmp/bot_fresh
+  git add -A
+  git commit -m "..."
+  git push https://TOKEN@github.com/andyrbek2709-tech/instagram-monitor-bot.git master
