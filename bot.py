@@ -1530,13 +1530,81 @@ class TelegramBot:
                 images_to_analyze = carousel_images[:4] if carousel_images else ([thumbnail_url] if thumbnail_url else [])
 
                 if not images_to_analyze:
-                    keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
-                                 InlineKeyboardButton("🔙 Меню", callback_data='back')]]
-                    await update.effective_chat.send_message(
-                        "⚠️ В этом посте нет текста и не удалось получить превью видео.",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                    return ConversationHandler.END
+                    # Нет превью/картинок — попробовать Whisper по video_url напрямую
+                    video_url_direct = post.get('video_url')
+                    if not video_url_direct:
+                        keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                                     InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                        await update.effective_chat.send_message(
+                            "⚠️ В этом посте нет текста и не удалось получить превью видео.",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                        return ConversationHandler.END
+
+                    openai_key_direct = os.getenv('OPENAI_API_KEY')
+                    if not openai_key_direct:
+                        keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                                     InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                        await update.effective_chat.send_message(
+                            "⚠️ Нет превью видео и нет OPENAI_API_KEY для транскрипции.\n"
+                            "Добавь его в Railway Variables.",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                        return ConversationHandler.END
+
+                    await update.effective_chat.send_message("🎤 Превью недоступно — слушаю речь в видео (Whisper)...")
+                    try:
+                        import requests as _req
+                        import io
+                        from openai import OpenAI as _OpenAI
+                        _oa_direct = _OpenAI(api_key=openai_key_direct)
+                        _ig_h = {
+                            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                            'Referer': 'https://www.instagram.com/',
+                        }
+                        head = _req.head(video_url_direct, headers=_ig_h, timeout=10)
+                        size = int(head.headers.get('content-length', 0))
+                        if 0 < size <= 24 * 1024 * 1024:
+                            vid_data = _req.get(video_url_direct, headers=_ig_h, timeout=60)
+                            vid_data.raise_for_status()
+                            audio_buf = io.BytesIO(vid_data.content)
+                            audio_buf.name = "video.mp4"
+                            transcript = _oa_direct.audio.transcriptions.create(model="whisper-1", file=audio_buf)
+                            transcript_text_direct = transcript.text.strip()
+                            if transcript_text_direct:
+                                try:
+                                    await update.effective_chat.send_message(
+                                        f"🎤 *Речь в видео:*\n\n{transcript_text_direct}", parse_mode='Markdown'
+                                    )
+                                except Exception:
+                                    await update.effective_chat.send_message(f"Речь в видео:\n\n{transcript_text_direct}")
+                                caption = f"[Что говорит человек]: {transcript_text_direct}"
+                            else:
+                                keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                                             InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                                await update.effective_chat.send_message(
+                                    "🔇 Речи в видео не обнаружено — нет текста, нет речи, нет превью.",
+                                    reply_markup=InlineKeyboardMarkup(keyboard)
+                                )
+                                return ConversationHandler.END
+                        else:
+                            size_mb = size // 1024 // 1024
+                            keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                                         InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                            await update.effective_chat.send_message(
+                                f"⚠️ Видео слишком большое ({size_mb} МБ, лимит 24 МБ) — транскрипция невозможна.",
+                                reply_markup=InlineKeyboardMarkup(keyboard)
+                            )
+                            return ConversationHandler.END
+                    except Exception as we_direct:
+                        logger.error(f"Whisper-only failed: {we_direct}", exc_info=True)
+                        keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
+                                     InlineKeyboardButton("🔙 Меню", callback_data='back')]]
+                        await update.effective_chat.send_message(
+                            f"❌ Whisper не смог транскрибировать: {str(we_direct)[:200]}",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                        return ConversationHandler.END
 
                 gemini_key = os.getenv('GEMINI_API_KEY')
                 if not gemini_key:
@@ -1610,43 +1678,46 @@ class TelegramBot:
                     transcript_text = ''
                     video_url = post.get('video_url')
                     if video_url:
-                        await update.effective_chat.send_message("🎤 Слушаю что говорят в видео (Whisper)...")
-                        try:
-                            import io
-                            ig_headers = {
-                                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-                                'Referer': 'https://www.instagram.com/',
-                            }
-                            # Проверить размер файла перед скачиванием
-                            head = _req.head(video_url, headers=ig_headers, timeout=10)
-                            size = int(head.headers.get('content-length', 0))
-                            if 0 < size <= 24 * 1024 * 1024:  # не больше 24 МБ (лимит Whisper 25 МБ)
-                                vid_data = _req.get(video_url, headers=ig_headers, timeout=60)
-                                vid_data.raise_for_status()
-                                audio_buf = io.BytesIO(vid_data.content)
-                                audio_buf.name = "video.mp4"
-                                transcript = oa_client.audio.transcriptions.create(
-                                    model="whisper-1",
-                                    file=audio_buf
-                                )
-                                transcript_text = transcript.text.strip()
-                                if transcript_text:
-                                    try:
-                                        await update.effective_chat.send_message(
-                                            f"🎤 *Речь в видео:*\n\n{transcript_text}",
-                                            parse_mode='Markdown'
-                                        )
-                                    except Exception:
-                                        await update.effective_chat.send_message(f"Речь в видео:\n\n{transcript_text}")
+                        openai_key = os.getenv('OPENAI_API_KEY')
+                        if not openai_key:
+                            await update.effective_chat.send_message(
+                                "⚠️ OPENAI_API_KEY не задан — транскрипция пропущена"
+                            )
+                        else:
+                            await update.effective_chat.send_message("🎤 Слушаю что говорят в видео (Whisper)...")
+                            try:
+                                import io
+                                from openai import OpenAI as _OpenAI
+                                _oa = _OpenAI(api_key=openai_key)
+                                _wh_headers = {
+                                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                                    'Referer': 'https://www.instagram.com/',
+                                }
+                                head = _req.head(video_url, headers=_wh_headers, timeout=10)
+                                size = int(head.headers.get('content-length', 0))
+                                if 0 < size <= 24 * 1024 * 1024:
+                                    vid_data = _req.get(video_url, headers=_wh_headers, timeout=60)
+                                    vid_data.raise_for_status()
+                                    audio_buf = io.BytesIO(vid_data.content)
+                                    audio_buf.name = "video.mp4"
+                                    tr = _oa.audio.transcriptions.create(model="whisper-1", file=audio_buf)
+                                    transcript_text = tr.text.strip()
+                                    if transcript_text:
+                                        try:
+                                            await update.effective_chat.send_message(
+                                                f"🎤 *Речь в видео:*\n\n{transcript_text}", parse_mode='Markdown'
+                                            )
+                                        except Exception:
+                                            await update.effective_chat.send_message(f"Речь в видео:\n\n{transcript_text}")
+                                    else:
+                                        await update.effective_chat.send_message("🔇 Речи в видео не обнаружено")
                                 else:
-                                    await update.effective_chat.send_message("🔇 Речи в видео не обнаружено")
-                            else:
-                                await update.effective_chat.send_message(
-                                    f"⚠️ Видео слишком большое ({size // 1024 // 1024} МБ) — транскрипция пропущена"
-                                )
-                        except Exception as we:
-                            logger.warning(f"Whisper failed: {we}")
-                            await update.effective_chat.send_message(f"⚠️ Whisper не смог транскрибировать: {str(we)[:150]}")
+                                    await update.effective_chat.send_message(
+                                        f"⚠️ Видео слишком большое ({size // 1024 // 1024} МБ) — транскрипция пропущена"
+                                    )
+                            except Exception as we:
+                                logger.warning(f"Whisper failed: {we}")
+                                await update.effective_chat.send_message(f"⚠️ Whisper не смог транскрибировать: {str(we)[:150]}")
 
                     # Объединить визуальное описание + транскрипцию
                     if transcript_text:
