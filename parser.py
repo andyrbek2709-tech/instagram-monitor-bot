@@ -7,11 +7,83 @@ import hashlib
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse, parse_qs
 
 logger = logging.getLogger(__name__)
 
 HIKER_BASE_URL = "https://api.hikerapi.com/v1"
+
+
+def _unwrap_hiker_media_payload(raw) -> Dict:
+    """Достать объект медиа из ответа HikerAPI (часто обёрнут в response/items)."""
+    if raw is None:
+        return {}
+    if isinstance(raw, list):
+        return _unwrap_hiker_media_payload(raw[0]) if raw else {}
+    if not isinstance(raw, dict):
+        return {}
+    data = raw
+    for _ in range(5):
+        inner = data.get("response")
+        if isinstance(inner, dict):
+            data = inner
+            continue
+        items = data.get("items")
+        if isinstance(items, list) and len(items) == 1 and isinstance(items[0], dict):
+            data = items[0]
+            continue
+        break
+    return data if isinstance(data, dict) else {}
+
+
+def _carousel_items_from_media(media: Dict) -> List[Dict]:
+    """Список слайдов карусели в формате Instagram (mobile API)."""
+    cm = media.get("carousel_media")
+    if isinstance(cm, list) and cm:
+        return cm
+    esc = media.get("edge_sidecar_to_children") or {}
+    edges = esc.get("edges") or []
+    out = []
+    for e in edges:
+        if isinstance(e, dict):
+            n = e.get("node")
+            if isinstance(n, dict):
+                out.append(n)
+    return out
+
+
+def _slide_image_and_video_urls(slide: Dict) -> tuple:
+    """URL превью картинки и видео для одного слайда карусели."""
+    image_url = None
+    iv2 = slide.get("image_versions2") or {}
+    cands = iv2.get("candidates") or []
+    if cands and isinstance(cands[0], dict):
+        image_url = cands[0].get("url")
+    if not image_url:
+        image_url = (
+            slide.get("display_url")
+            or slide.get("thumbnail_url")
+            or slide.get("cover_frame_url")
+        )
+    video_url = None
+    vv = slide.get("video_versions") or []
+    if vv and isinstance(vv[0], dict):
+        video_url = vv[0].get("url")
+    if not video_url:
+        video_url = slide.get("video_url")
+    return image_url, video_url
+
+
+def _parse_img_index_from_url(url: str) -> Optional[int]:
+    """img_index из query (Instagram web): обычно 0 — первый слайд, 1 — второй и т.д."""
+    try:
+        q = parse_qs(urlparse(url).query)
+        if "img_index" not in q or not q["img_index"]:
+            return None
+        v = int(q["img_index"][0])
+        return max(0, v)
+    except (ValueError, TypeError):
+        return None
 
 
 def log_to_db(db_url: str, target: str, stage: str, level: str, message: str) -> None:
@@ -128,31 +200,61 @@ class Parser:
         self.hiker = HikerAPIClient(api_key)
 
     def get_post_by_url(self, url: str) -> Optional[Dict]:
-        """Получить один пост по прямой ссылке Instagram"""
+        """Получить один пост по прямой ссылке Instagram (включая карусель и img_index)."""
         match = re.search(r'instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)', url)
         if not match:
             return None
         code = match.group(1)
-        media = self.hiker.get_media_by_code(code)
+        focus_slide = _parse_img_index_from_url(url)
+
+        raw = self.hiker.get_media_by_code(code)
+        media = _unwrap_hiker_media_payload(raw)
         if not media:
             return None
 
-        logger.info(f"HikerAPI [{code}]: media_type={media.get('media_type')}, "
-                    f"carousel_count={len(media.get('carousel_media') or [])}, "
-                    f"has_image_versions2={bool(media.get('image_versions2'))}, "
-                    f"has_video_versions={bool(media.get('video_versions'))}, "
-                    f"has_thumbnail_url={bool(media.get('thumbnail_url'))}, "
-                    f"keys={list(media.keys())[:20]}")
+        carousel_items = _carousel_items_from_media(media)
+        carousel_slides = []
+        carousel_images = []
+        for i, slide in enumerate(carousel_items):
+            img_u, vid_u = _slide_image_and_video_urls(slide)
+            acc = slide.get('accessibility_caption') or ''
+            if isinstance(acc, dict):
+                acc = self._parse_caption(acc) or ''
+            elif not isinstance(acc, str):
+                acc = str(acc) if acc else ''
+            mt = slide.get('media_type', 1)
+            try:
+                mt = int(mt)
+            except (TypeError, ValueError):
+                mt = 1
+            carousel_slides.append({
+                'index': i,
+                'media_type': mt,
+                'image_url': img_u,
+                'video_url': vid_u,
+                'accessibility_caption': acc.strip(),
+            })
+            if img_u:
+                carousel_images.append(img_u)
+
+        logger.info(
+            f"HikerAPI [{code}]: media_type={media.get('media_type')}, "
+            f"carousel_slides={len(carousel_slides)}, "
+            f"has_image_versions2={bool(media.get('image_versions2'))}, "
+            f"has_video_versions={bool(media.get('video_versions'))}, "
+            f"has_thumbnail_url={bool(media.get('thumbnail_url'))}, "
+            f"keys={list(media.keys())[:24]}"
+        )
 
         caption_raw = media.get('caption') or ''
         caption = self._parse_caption(caption_raw)
         user = media.get('user') or {}
 
-        # Извлечь URL превью/обложки
+        # Превью/обложка верхнего уровня
         thumbnail_url = None
         image_versions = media.get('image_versions2') or {}
         candidates = image_versions.get('candidates') or []
-        if candidates:
+        if candidates and isinstance(candidates[0], dict):
             thumbnail_url = candidates[0].get('url')
         if not thumbnail_url:
             thumbnail_url = (
@@ -161,41 +263,40 @@ class Parser:
                 or media.get('cover_frame_url')
             )
 
-        # Извлечь URL видео — для любого типа (Reel, video, или видео в карусели)
+        # Видео верхнего уровня (не карусель или первое видео в ленте)
         video_url = None
         video_versions = media.get('video_versions') or []
-        if video_versions:
+        if video_versions and isinstance(video_versions[0], dict):
             video_url = video_versions[0].get('url')
         if not video_url:
             video_url = media.get('video_url')
 
-        # Извлечь URLs картинок из карусели (media_type == 8)
-        carousel_images = []
-        carousel_media = media.get('carousel_media') or []
-        for slide in carousel_media:
-            slide_img = None
-            slide_versions = slide.get('image_versions2') or {}
-            slide_candidates = slide_versions.get('candidates') or []
-            if slide_candidates:
-                slide_img = slide_candidates[0].get('url')
-            if not slide_img:
-                slide_img = (slide.get('thumbnail_url')
-                             or slide.get('display_url')
-                             or slide.get('cover_frame_url'))
-            if slide_img:
-                carousel_images.append(slide_img)
-            # Если слайд — видео и ещё нет video_url — берём его
+        # Карусель: превью и видео — слайд из img_index в ссылке, иначе первый слайд
+        if carousel_slides:
+            idx = focus_slide if focus_slide is not None else 0
+            if idx >= len(carousel_slides):
+                idx = 0
+            focused = carousel_slides[idx]
+            if focused.get('image_url'):
+                thumbnail_url = focused['image_url']
+            if focused.get('video_url'):
+                video_url = focused['video_url']
             if not video_url:
-                slide_vid = slide.get('video_versions') or []
-                if slide_vid:
-                    video_url = slide_vid[0].get('url')
-        # Если карусель и нет thumbnail — берём первый слайд
-        if carousel_images and not thumbnail_url:
-            thumbnail_url = carousel_images[0]
+                for s in carousel_slides:
+                    if s.get('video_url'):
+                        video_url = s['video_url']
+                        break
+            if not thumbnail_url and carousel_images:
+                thumbnail_url = carousel_images[0]
+
+        canonical_url = f"https://www.instagram.com/p/{code}/"
+        if focus_slide is not None:
+            canonical_url = f"{canonical_url}?img_index={focus_slide}"
 
         return {
             'post_id': str(media.get('pk') or media.get('id') or ''),
-            'url': url,
+            'url': canonical_url,
+            'source_url': url.strip(),
             'caption': caption,
             'media_type': media.get('media_type', 1),
             'likes': media.get('like_count', 0) or 0,
@@ -205,6 +306,9 @@ class Parser:
             'thumbnail_url': thumbnail_url,
             'video_url': video_url,
             'carousel_images': carousel_images,
+            'carousel_slides': carousel_slides,
+            'focus_slide_index': focus_slide if focus_slide is not None else 0,
+            'is_carousel': len(carousel_slides) > 1 or media.get('media_type') == 8,
         }
 
     def _parse_caption(self, caption_data) -> str:

@@ -7,7 +7,7 @@ import asyncio
 import google.genai as genai
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (Application, CommandHandler, MessageHandler, ConversationHandler,
                           CallbackQueryHandler, filters, ContextTypes)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -19,6 +19,101 @@ logger = logging.getLogger(__name__)
 ADD_ACCOUNT, CONFIRM_ACCOUNT, SELECT_NUM_POSTS, SELECT_INTERVAL = range(4)
 WAIT_SESSIONID = 100
 WAIT_URL = 101
+
+IG_CDN_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+    'Referer': 'https://www.instagram.com/',
+}
+
+
+def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slides: int = 12) -> str:
+    """OCR и описание каждого слайда карусели + транскрипт видео-слайдов (Gemini, google.genai)."""
+    if not slides or not gemini_key:
+        return ''
+
+    import io
+    import os as _os
+    import tempfile
+    import requests as _req
+    import PIL.Image
+
+    gemini_client = genai.Client(api_key=gemini_key)
+    blocks = []
+    vision_prompt = (
+        'Это кадр из карусели Instagram. '
+        '1) Выпиши ВЕСЬ читаемый текст на кадре (OCR), дословно, построчно если нужно. '
+        '2) Два коротких предложения — что изображено и зачем этот кадр в посте. '
+        'Ответ на русском. Если текста на кадре нет — первая строка: «Текста на кадре нет».'
+    )
+
+    for i, sl in enumerate(slides[:max_slides]):
+        idx = i + 1
+        lines = [f'=== Слайд {idx} (из карусели) ===']
+        acc = (sl.get('accessibility_caption') or '').strip()
+        if acc:
+            lines.append(f'Подпись доступности Instagram:\n{acc}')
+
+        img_url = sl.get('image_url')
+        if img_url:
+            try:
+                img_resp = _req.get(img_url, headers=IG_CDN_HEADERS, timeout=30)
+                img_resp.raise_for_status()
+                img = PIL.Image.open(io.BytesIO(img_resp.content))
+                vision_resp = gemini_client.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=[img, vision_prompt],
+                )
+                lines.append('Анализ кадра (OCR + описание):\n' + (vision_resp.text or '').strip())
+            except Exception as e:
+                logger.warning(f'Carousel slide {idx} vision failed: {e}')
+                lines.append(f'(не удалось разобрать картинку слайда: {str(e)[:160]})')
+
+        vid_url = sl.get('video_url')
+        try:
+            mt = int(sl.get('media_type', 1) or 1)
+        except (TypeError, ValueError):
+            mt = 1
+        if vid_url and mt == 2:
+            try:
+                head = _req.head(vid_url, headers=IG_CDN_HEADERS, timeout=12)
+                size = int(head.headers.get('content-length', 0))
+                if 0 < size <= 100 * 1024 * 1024:
+                    vid_data = _req.get(vid_url, headers=IG_CDN_HEADERS, timeout=90)
+                    vid_data.raise_for_status()
+                    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_f:
+                        tmp_path = tmp_f.name
+                        tmp_f.write(vid_data.content)
+                    try:
+                        uploaded = gemini_client.files.upload(
+                            file=tmp_path,
+                            config={'mime_type': 'video/mp4'},
+                        )
+                        tr = gemini_client.models.generate_content(
+                            model='gemini-2.0-flash',
+                            contents=[
+                                uploaded,
+                                'Транскрибируй всю речь из видео дословно. Если на другом языке — переведи на русский. '
+                                "Если речи нет — напиши 'Речи нет'.",
+                            ],
+                        )
+                        gemini_client.files.delete(name=uploaded.name)
+                        transcript = (tr.text or '').strip()
+                        if transcript and transcript.lower() != 'речи нет':
+                            lines.append(f'Речь в видео (слайд {idx}):\n{transcript}')
+                    finally:
+                        try:
+                            _os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                elif size > 100 * 1024 * 1024:
+                    lines.append(f'(видео слайда {idx} слишком большое для транскрипции, ~{size // 1024 // 1024} МБ)')
+            except Exception as e:
+                logger.warning(f'Carousel slide {idx} video transcript failed: {e}')
+                lines.append(f'(транскрипт видео слайда недоступен: {str(e)[:120]})')
+
+        blocks.append('\n'.join(lines))
+
+    return '\n\n'.join(blocks)
 
 
 class DigestFormatter:
@@ -895,8 +990,12 @@ class TelegramBot:
     async def analyze_url_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Получить ссылку, спарсить пост и автоматически разобрать через Gemini"""
         text = update.message.text.strip()
-        match = re.search(r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)', text)
-        if not match:
+        full = re.search(
+            r'(https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/[A-Za-z0-9_-]+[^\s]*)',
+            text,
+            re.IGNORECASE,
+        )
+        if not full:
             await update.message.reply_text(
                 "❌ Это не похоже на ссылку Instagram.\n\n"
                 "Нужна ссылка вида `https://www.instagram.com/p/...` или `/reel/...`\n\n"
@@ -905,7 +1004,7 @@ class TelegramBot:
             )
             return WAIT_URL
 
-        url = match.group(0)
+        url = full.group(1).strip().rstrip('.,;)]>»»\'"')
         status_msg = await update.message.reply_text("⏳ Получаю пост...")
 
         try:
@@ -925,21 +1024,90 @@ class TelegramBot:
             account = post.get('account', '')
             likes = post.get('likes', 0)
             comments = post.get('comments', 0)
+            slides = post.get('carousel_slides') or []
+            display_link = post.get('url') or post.get('source_url') or url
 
             # Показать сырой текст поста
             cap_display = (caption[:800] + '…') if len(caption) > 800 else caption
             raw_text = f"📌 *Пост{' @' + account if account else ''}*\n\n"
             raw_text += cap_display if cap_display else '_(текст отсутствует — только медиа)_'
-            raw_text += f"\n\n❤️ {likes}  💬 {comments}  🔗 {url}"
+            raw_text += f"\n\n❤️ {likes}  💬 {comments}  🔗 {display_link}"
+            if post.get('is_carousel') or len(slides) > 1:
+                raw_text += f"\n\n📎 *Карусель:* {len(slides)} слайд(ов)"
 
             try:
                 await status_msg.edit_text(raw_text, parse_mode='Markdown')
             except Exception:
-                await status_msg.edit_text(f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{url}")
+                await update.effective_chat.send_message(
+                    f"Пост {'@' + account if account else ''}\n\n{cap_display or '(нет текста)'}\n{display_link}"
+                )
 
-            # Если нет текста — попробовать GPT-4o Vision по thumbnail
-            if not caption:
+            gemini_key = os.getenv('GEMINI_API_KEY')
+
+            # Картинки карусели в Telegram (альбом 2–10 фото или одно фото)
+            import io
+            import requests as _req
+            photo_slides = [s for s in slides if s.get('image_url')]
+            if len(photo_slides) >= 2:
+                media_items = []
+                for sl in photo_slides[:10]:
+                    iu = sl.get('image_url')
+                    try:
+                        blob = await asyncio.to_thread(
+                            lambda u=iu: _req.get(u, headers=IG_CDN_HEADERS, timeout=35).content
+                        )
+                        media_items.append(InputMediaPhoto(media=io.BytesIO(blob)))
+                    except Exception as me:
+                        logger.warning(f'Carousel photo download skip: {me}')
+                if len(media_items) >= 2:
+                    try:
+                        await update.effective_chat.send_media_group(media_items)
+                    except Exception as mg_e:
+                        logger.warning(f'media_group failed: {mg_e}')
+            elif len(photo_slides) == 1:
+                try:
+                    iu = photo_slides[0]['image_url']
+                    blob = await asyncio.to_thread(
+                        lambda: _req.get(iu, headers=IG_CDN_HEADERS, timeout=35).content
+                    )
+                    await update.effective_chat.send_photo(
+                        photo=io.BytesIO(blob),
+                        caption=f"Слайд 1/{len(slides)}" if slides else None,
+                    )
+                except Exception as pe:
+                    logger.warning(f'send_photo carousel: {pe}')
+
+            if slides and not gemini_key:
+                await update.effective_chat.send_message(
+                    "⚠️ Чтобы прочитать текст с картинок и речь в видео-слайдах карусели, "
+                    "нужен `GEMINI_API_KEY` в переменных окружения."
+                )
+
+            if slides and gemini_key:
+                await update.effective_chat.send_message(
+                    f"🖼 Разбираю {len(slides)} слайд(ов): OCR с картинок и речь из видео..."
+                )
+                carousel_ctx = await asyncio.to_thread(
+                    _build_carousel_slides_context, slides, gemini_key
+                )
+                if carousel_ctx:
+                    if caption.strip():
+                        caption = (
+                            caption.strip()
+                            + "\n\n=== Содержимое слайдов карусели ===\n"
+                            + carousel_ctx
+                        )
+                    else:
+                        caption = "=== Содержимое слайдов карусели ===\n" + carousel_ctx
+
+            # Если нет текста — попробовать Gemini Vision по thumbnail
+            if not caption.strip():
                 thumbnail_url = post.get('thumbnail_url')
+                if not thumbnail_url and slides:
+                    for sl in slides:
+                        if sl.get('image_url'):
+                            thumbnail_url = sl['image_url']
+                            break
                 if not thumbnail_url:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
@@ -960,21 +1128,18 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через GPT-4o Vision...")
+                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через Gemini Vision...")
 
                 try:
                     import requests as _req
                     import PIL.Image
                     import io as _io
-                    import tempfile, os as _os
+                    import tempfile
+                    import os as _os
 
-                    # Скачать превью (thumbnail) для Gemini Vision
                     img_resp = _req.get(
                         thumbnail_url,
-                        headers={
-                            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-                            'Referer': 'https://www.instagram.com/',
-                        },
+                        headers=IG_CDN_HEADERS,
                         timeout=20
                     )
                     img_resp.raise_for_status()
@@ -1005,14 +1170,10 @@ class TelegramBot:
                     if video_url:
                         await update.effective_chat.send_message("🎤 Слушаю что говорят в видео (Gemini)...")
                         try:
-                            ig_headers = {
-                                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-                                'Referer': 'https://www.instagram.com/',
-                            }
-                            head = _req.head(video_url, headers=ig_headers, timeout=10)
+                            head = _req.head(video_url, headers=IG_CDN_HEADERS, timeout=10)
                             size = int(head.headers.get('content-length', 0))
                             if 0 < size <= 100 * 1024 * 1024:  # до 100 МБ
-                                vid_data = _req.get(video_url, headers=ig_headers, timeout=60)
+                                vid_data = _req.get(video_url, headers=IG_CDN_HEADERS, timeout=60)
                                 vid_data.raise_for_status()
                                 with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_f:
                                     tmp_path = tmp_f.name
@@ -1077,8 +1238,23 @@ class TelegramBot:
                 # Выбрать промпт в зависимости от типа контента
                 has_speech = "[Что говорит человек]" in caption
                 has_visual = "[Что видно в кадре]" in caption
+                is_carousel_prompt = (
+                    "=== Содержимое слайдов карусели ===" in caption
+                    or "=== Слайд" in caption
+                )
 
-                if has_speech and has_visual:
+                if is_carousel_prompt:
+                    prompt = (
+                        "Это пост Instagram с каруселью (несколько кадров). В тексте ниже — подпись автора "
+                        "и разбор слайдов: OCR с картинок и транскрипты речи из видео-слайдов.\n"
+                        "Свяжи слайды в единую мысль и посыл. Ответь на русском языке:\n\n"
+                        "СУТЬ ПУБЛИКАЦИИ:\n[2–4 предложения]\n\n"
+                        "ЛОГИКА ПО СЛАЙДАМ:\n[кратко: что на каждом этапе и зачем]\n\n"
+                        "КЛЮЧЕВЫЕ ИДЕИ:\n[3–5 тезисов через •]\n\n"
+                        "ИДЕИ ДЛЯ СВОЕГО КОНТЕНТА:\n[2–3 идеи]\n\n"
+                        f"---\n{caption[:12000]}"
+                    )
+                elif has_speech and has_visual:
                     # Видео со звуком: речь = суть, визуал = контекст
                     prompt = (
                         "Ты анализируешь видео-пост из Instagram. У тебя два источника:\n"
@@ -1117,11 +1293,12 @@ class TelegramBot:
                         f"---\n{caption[:2000]}"
                     )
 
+                max_tokens = 2048 if is_carousel_prompt else 1000
                 g_client = genai.Client(api_key=gemini_key)
                 response = g_client.models.generate_content(
                     model='gemini-2.0-flash',
                     contents=prompt,
-                    config={'temperature': 0.2, 'max_output_tokens': 1000}
+                    config={'temperature': 0.2, 'max_output_tokens': max_tokens}
                 )
                 result = response.text.strip()
 
