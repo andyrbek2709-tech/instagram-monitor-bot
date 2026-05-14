@@ -5,7 +5,7 @@ import json
 import time
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-import google.generativeai as genai
+import google.genai as genai
 
 logger = logging.getLogger(__name__)
 
@@ -50,17 +50,15 @@ class ContentFilter:
         """Быстрая классификация через Gemini с retry"""
         for attempt in range(MAX_FILTER_RETRIES):
             try:
-                genai.configure(api_key=self.gemini_api_key)
-                model = genai.GenerativeModel(
-                    'gemini-2.0-flash',
-                    generation_config=genai.GenerationConfig(temperature=0.0, max_output_tokens=80)
+                client = genai.Client(api_key=self.gemini_api_key)
+                prompt = (
+                    f"Ты — Gemini. Классифицируй эту подпись Instagram:\n{caption}\n\n"
+                    'Верни JSON: {"is_ad": bool, "is_greeting": bool, "is_personal": bool}\nТолько JSON, без текста.'
                 )
-                response = model.generate_content(
-                    f"""Ты — Gemini. Классифицируй эту подпись Instagram:
-{caption}
-
-Верни JSON: {{"is_ad": bool, "is_greeting": bool, "is_personal": bool}}
-Только JSON, без текста."""
+                response = client.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=prompt,
+                    config={'temperature': 0.0, 'max_output_tokens': 80}
                 )
                 result_text = response.text.strip()
                 return json.loads(result_text)
