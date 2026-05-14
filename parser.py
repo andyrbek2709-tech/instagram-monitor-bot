@@ -163,6 +163,23 @@ class Parser:
             if not video_url:
                 video_url = media.get('video_url')
 
+        # Извлечь URLs картинок из карусели (media_type == 8)
+        carousel_images = []
+        carousel_media = media.get('carousel_media') or []
+        for slide in carousel_media:
+            slide_img = None
+            slide_versions = slide.get('image_versions2') or {}
+            slide_candidates = slide_versions.get('candidates') or []
+            if slide_candidates:
+                slide_img = slide_candidates[0].get('url')
+            if not slide_img:
+                slide_img = slide.get('thumbnail_url') or slide.get('display_url')
+            if slide_img:
+                carousel_images.append(slide_img)
+        # Если карусель и нет thumbnail — берём первый слайд
+        if carousel_images and not thumbnail_url:
+            thumbnail_url = carousel_images[0]
+
         return {
             'post_id': str(media.get('pk') or media.get('id') or ''),
             'url': url,
@@ -174,6 +191,7 @@ class Parser:
             'account': user.get('username', ''),
             'thumbnail_url': thumbnail_url,
             'video_url': video_url,
+            'carousel_images': carousel_images,
         }
 
     def _parse_caption(self, caption_data) -> str:
