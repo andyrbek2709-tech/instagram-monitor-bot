@@ -20,17 +20,21 @@ class MediaParser:
     """
 
     def __init__(self):
+        logger.info("Инициализация MediaParser...")
         self._check_installed()
+        logger.info("MediaParser успешно инициализирован, yt-dlp доступен")
 
     @staticmethod
     def _check_installed():
         """Проверить, установлен ли yt-dlp"""
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["yt-dlp", "--version"],
                 capture_output=True, text=True, timeout=10
             )
-        except FileNotFoundError:
+            logger.info(f"yt-dlp версия: {result.stdout.strip()}")
+        except FileNotFoundError as e:
+            logger.error("yt-dlp не найден в PATH!", exc_info=True)
             raise RuntimeError("yt-dlp не установлен. Установи: pip install yt-dlp")
 
     def search(self, query: str, max_results: int = 10, platform: str = "ytsearch") -> List[Dict]:
@@ -78,21 +82,29 @@ class MediaParser:
     def get_video_info(self, url: str) -> Optional[Dict]:
         """Получить детальную информацию о видео по URL"""
         try:
+            logger.info(f"Запуск yt-dlp для: {url}")
             result = subprocess.run(
                 ["yt-dlp", "--dump-json", "--no-download",
                  "--no-playlist", url],
                 capture_output=True, text=True, timeout=30
             )
 
+            logger.info(f"yt-dlp returncode: {result.returncode}")
+            if result.stderr:
+                logger.error(f"yt-dlp stderr: {result.stderr[:500]}")
+            if result.stdout:
+                logger.info(f"yt-dlp stdout length: {len(result.stdout)}")
+
             if result.returncode != 0 or not result.stdout.strip():
                 logger.warning(f"yt-dlp info error for {url}: {result.stderr[:200]}")
                 return None
 
             data = json.loads(result.stdout.strip().split("\n")[0])
+            logger.info(f"Успешно распарсен {url}, данных: {len(data)} полей")
             return self._parse_data(data)
 
         except Exception as e:
-            logger.error(f"yt-dlp info error: {e}")
+            logger.error(f"yt-dlp info error: {e}", exc_info=True)
             return None
 
     def trending(self, max_results: int = 10) -> List[Dict]:
