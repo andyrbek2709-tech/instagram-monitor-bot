@@ -1119,7 +1119,7 @@ class TelegramBot:
                 post = await asyncio.to_thread(self.parser.get_post_by_url, url)
             else:
                 # YouTube или TikTok через MediaParser
-                post = await asyncio.to_thread(self.media_parser.parse_url, url)
+                post = await asyncio.to_thread(self.media_parser.get_video_info, url)
 
             if not post:
                 await status_msg.edit_text(
@@ -1643,7 +1643,7 @@ class TelegramBot:
                 post = await asyncio.to_thread(self.parser.get_post_by_url, url)
             else:
                 # YouTube или TikTok через MediaParser
-                post = await asyncio.to_thread(self.media_parser.parse_url, url)
+                post = await asyncio.to_thread(self.media_parser.get_video_info, url)
 
             if not post:
                 await msg.edit_text("❌ Не удалось получить контент. Проверь ссылку.")
