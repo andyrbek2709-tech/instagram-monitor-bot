@@ -1136,6 +1136,9 @@ class TelegramBot:
             views = post.get('views', 0) or post.get('view_count', 0)
             display_link = post.get('url') or post.get('webpage_url') or url
 
+            # Получаем слайды карусели (только для Instagram)
+            slides = [s for s in (post.get('carousel_slides') or []) if isinstance(s, dict)] if platform == 'instagram' else []
+
             # Показываем сырой текст поста
             cap_display = (caption[:800] + '…') if len(caption) > 800 else caption
 
@@ -1162,7 +1165,7 @@ class TelegramBot:
                     f"❤️ {likes}  💬 {comments}",
                     display_link,
                 ]
-                if post.get('is_carousel') or len(slides) > 1:
+                if platform == 'instagram' and (post.get('is_carousel') or len(slides) > 1):
                     fb_lines.extend(["", f"Карусель: {len(slides)} слайд(ов)"])
                 await update.effective_chat.send_message("\n".join(fb_lines))
 
