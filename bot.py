@@ -13,6 +13,7 @@ from telegram.ext import (Application, CommandHandler, MessageHandler, Conversat
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import random
+import asyncio
 
 logger = logging.getLogger(__name__)
 
