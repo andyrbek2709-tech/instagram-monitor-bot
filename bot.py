@@ -1061,52 +1061,95 @@ class TelegramBot:
         return WAIT_URL
 
     async def analyze_url_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Получить ссылку, спарсить пост и автоматически разобрать через Gemini"""
+        """Получить ссылку, спарсить пост и автоматически разобрать через Gemini (Instagram, YouTube, TikTok)"""
         text = update.message.text.strip()
-        full = re.search(
+
+        # Проверяем Instagram ссылки
+        ig_full = re.search(
             r'(https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/[A-Za-z0-9_-]+[^\s]*)',
             text,
             re.IGNORECASE,
         )
+
+        # Проверяем YouTube ссылки
+        yt_full = re.search(
+            r'(https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/|m\.youtube\.com/(?:watch\?v=|shorts/))[A-Za-z0-9_-]+[^\s]*)',
+            text,
+            re.IGNORECASE,
+        )
+
+        # Проверяем TikTok ссылки
+        tt_full = re.search(
+            r'(https?://(?:www\.)?tiktok\.com/@[\w.-]+/video/\d+[^\s]*)',
+            text,
+            re.IGNORECASE,
+        )
+
+        full = ig_full or yt_full or tt_full
+
         if not full:
             await update.message.reply_text(
-                "❌ Это не похоже на ссылку Instagram.\n\n"
-                "Нужна ссылка вида `https://www.instagram.com/p/...` или `/reel/...`\n\n"
+                "❌ Это не похоже на ссылку Instagram/YouTube/TikTok.\n\n"
+                "Нужна ссылка вида:\n"
+                "- `https://www.instagram.com/p/...` или `/reel/...`\n"
+                "- `https://youtube.com/watch?v=...` или `/shorts/...`\n"
+                "- `https://tiktok.com/@username/video/...`\n\n"
                 "Попробуй ещё раз или /cancel",
                 parse_mode='Markdown'
             )
             return WAIT_URL
 
         url = full.group(1).strip().rstrip('.,;)]>»»\'"')
-        status_msg = await update.message.reply_text("⏳ Получаю пост...")
+
+        # Определяем платформу
+        platform = 'instagram'
+        if yt_full:
+            platform = 'youtube'
+        elif tt_full:
+            platform = 'tiktok'
+
+        status_msg = await update.message.reply_text(f"⏳ Получаю {platform} контент...")
 
         try:
-            if not self.parser:
-                await status_msg.edit_text("❌ Парсер не инициализирован.")
-                return ConversationHandler.END
+            post = None
+            if platform == 'instagram':
+                if not self.parser:
+                    await status_msg.edit_text("❌ Парсер Instagram не инициализирован.")
+                    return ConversationHandler.END
+                post = await asyncio.to_thread(self.parser.get_post_by_url, url)
+            else:
+                # YouTube или TikTok через MediaParser
+                post = await asyncio.to_thread(self.media_parser.parse_url, url)
 
-            post = await asyncio.to_thread(self.parser.get_post_by_url, url)
             if not post:
                 await status_msg.edit_text(
-                    "❌ Не удалось получить пост.\n\n"
-                    "Возможные причины: закрытый аккаунт, удалённый пост или неверная ссылка."
+                    f"❌ Не удалось получить {platform} контент.\n\n"
+                    "Возможные причины: удалённый контент, закрытый аккаунт или неверная ссылка."
                 )
                 return ConversationHandler.END
 
-            caption = post.get('caption', '') or ''
-            account = post.get('account', '')
-            likes = post.get('likes', 0)
-            comments = post.get('comments', 0)
-            slides = [s for s in (post.get('carousel_slides') or []) if isinstance(s, dict)]
-            display_link = post.get('url') or post.get('source_url') or url
+            # Форматируем данные для совместимости с Instagram форматом
+            caption = post.get('description') or post.get('caption') or ''
+            account = post.get('channel') or post.get('uploader') or post.get('account', '')
+            likes = post.get('likes', 0) or post.get('like_count', 0)
+            comments = post.get('comments', 0) or post.get('comment_count', 0)
+            views = post.get('views', 0) or post.get('view_count', 0)
+            display_link = post.get('url') or post.get('webpage_url') or url
 
-            # Показать сырой текст поста
+            # Показываем сырой текст поста
             cap_display = (caption[:800] + '…') if len(caption) > 800 else caption
-            raw_text = f"📌 *Пост{' @' + account if account else ''}*\n\n"
+
+            platform_emoji = {'instagram': '📸', 'youtube': '📺', 'tiktok': '🎵'}
+            raw_text = f"{platform_emoji.get(platform, '🔗')} *{platform.title()} {'от @' + account if account else ''}*\n\n"
             raw_text += cap_display if cap_display else '_(текст отсутствует — только медиа)_'
-            raw_text += f"\n\n❤️ {likes}  💬 {comments}  🔗 {display_link}"
-            if post.get('is_carousel') or len(slides) > 1:
-                raw_text += f"\n\n📎 *Карусель:* {len(slides)} слайд(ов)"
+
+            # Для YouTube/TikTok показываем количество просмотров
+            if platform in ('youtube', 'tiktok'):
+                raw_text += f"\n\n👁️ {views}  ❤️ {likes}  💬 {comments}"
+            else:
+                raw_text += f"\n\n❤️ {likes}  💬 {comments}"
+
+            raw_text += f"  🔗 {display_link}"
 
             try:
                 await status_msg.edit_text(raw_text, parse_mode='Markdown')
