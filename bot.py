@@ -14,6 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import random
 import asyncio
+from media_parser import MediaParser
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +274,7 @@ class TelegramBot:
         self.analyzer = analyzer
         self.instagram_username = os.getenv('INSTAGRAM_USERNAME')
         self.instagram_password = os.getenv('INSTAGRAM_PASSWORD')
+        self.media_parser = MediaParser()  # Для YouTube, TikTok
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик /start"""
@@ -1563,37 +1565,68 @@ class TelegramBot:
             await query.edit_message_text(f"❌ Ошибка генерации промпта: {str(e)[:200]}")
 
     async def handle_instagram_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Получить пост по ссылке Instagram и показать содержимое"""
+        """Получить пост по ссылке Instagram, YouTube, TikTok и показать содержимое"""
         text = update.message.text.strip()
-        match = re.search(r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)', text)
-        if not match:
+
+        # Проверяем Instagram ссылки
+        ig_match = re.search(r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)', text)
+
+        # Проверяем YouTube ссылки
+        yt_match = re.search(r'(https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/|m\.youtube\.com/(?:watch\?v=|shorts/))([A-Za-z0-9_-]+))', text)
+
+        # Проверяем TikTok ссылки
+        tt_match = re.search(r'https?://(?:www\.)?tiktok\.com/@[\w.-]+/video/(\d+)', text)
+
+        if not ig_match and not yt_match and not tt_match:
             return
 
-        url = match.group(0)
-        msg = await update.message.reply_text("⏳ Получаю пост по ссылке...")
+        # Определяем тип ссылки
+        platform = 'instagram'
+        url = ig_match.group(0) if ig_match else (yt_match.group(0) if yt_match else tt_match.group(0))
+
+        if yt_match:
+            platform = 'youtube'
+        elif tt_match:
+            platform = 'tiktok'
+
+        msg = await update.message.reply_text(f"⏳ Получаю {platform} контент...")
 
         try:
-            if not self.parser:
-                await msg.edit_text("❌ Парсер не инициализирован.")
-                return
+            post = None
+            if platform == 'instagram':
+                if not self.parser:
+                    await msg.edit_text("❌ Парсер Instagram не инициализирован.")
+                    return
+                post = await asyncio.to_thread(self.parser.get_post_by_url, url)
+            else:
+                # YouTube или TikTok через MediaParser
+                post = await asyncio.to_thread(self.media_parser.parse_url, url)
 
-            post = await asyncio.to_thread(self.parser.get_post_by_url, url)
             if not post:
-                await msg.edit_text("❌ Не удалось получить пост. Проверь ссылку.")
+                await msg.edit_text("❌ Не удалось получить контент. Проверь ссылку.")
                 return
 
+            # Форматируем данные для совместимости с Instagram форматом
             context.user_data['last_post'] = post
 
-            caption = post.get('caption', '') or ''
-            account = post.get('account', '')
-            likes = post.get('likes', 0)
-            comments = post.get('comments', 0)
+            caption = post.get('description') or post.get('caption') or ''
+            account = post.get('channel') or post.get('uploader') or post.get('account', '')
+            likes = post.get('likes', 0) or post.get('like_count', 0)
+            comments = post.get('comments', 0) or post.get('comment_count', 0)
+            views = post.get('views', 0) or post.get('view_count', 0)
 
             cap_display = (caption[:800] + '…') if len(caption) > 800 else caption
 
-            header = f"📌 *Пост{' от @' + account if account else ''}*\n\n"
+            platform_emoji = {'instagram': '📸', 'youtube': '📺', 'tiktok': '🎵'}
+            header = f"{platform_emoji.get(platform, '🔗')} *{platform.title()} {'от @' + account if account else ''}*\n\n"
+
+            # Для YouTube/TikTok показываем количество просмотров
+            if platform in ('youtube', 'tiktok'):
+                footer = f"\n\n👁️ {views}  ❤️ {likes}  💬 {comments}\n🔗 {url}"
+            else:
+                footer = f"\n\n❤️ {likes}  💬 {comments}\n🔗 {url}"
+
             body = cap_display if cap_display else '_(текст отсутствует — только медиа)_'
-            footer = f"\n\n❤️ {likes}  💬 {comments}\n🔗 {url}"
 
             keyboard = [
                 [InlineKeyboardButton("📝 Краткое резюме", callback_data='analyze_summary')],
