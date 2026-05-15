@@ -17,7 +17,7 @@ def _ensure_directories() -> None:
 _ensure_directories()
 
 # Импорты модулей проекта
-from parser import Parser
+from ig_parser import Parser
 from filter import Filter
 from analyzer import Analyzer
 from bot import TelegramBot, SchedulerManager
