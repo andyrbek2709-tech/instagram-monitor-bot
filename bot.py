@@ -1546,16 +1546,15 @@ class TelegramBot:
                 [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
             ]
 
-            header = "📋 *Готовый промпт — скопируй и вставь в Gemini:*\n\n"
             try:
                 await query.edit_message_text(
-                    header + ready_prompt,
+                    ready_prompt,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode='Markdown'
                 )
             except Exception:
                 await query.edit_message_text(
-                    f"Готовый промпт:\n\n{ready_prompt}",
+                    ready_prompt,
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
