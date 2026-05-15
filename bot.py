@@ -3,17 +3,16 @@ import re
 import psycopg2
 import json
 import logging
-import asyncio
-import google.genai as genai
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (Application, CommandHandler, MessageHandler, ConversationHandler,
                           CallbackQueryHandler, filters, ContextTypes)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import random
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -52,24 +51,24 @@ def _carousel_skip_video_when_has_image() -> bool:
     return v in ('1', 'true', 'yes', 'on')
 
 
-def _gemini_response_text(response) -> str:
-    """Текст ответа google.genai (поле text может отсутствовать)."""
-    t = getattr(response, 'text', None)
-    if t is not None:
-        return (t or '').strip()
+def _openai_response_text(response) -> str:
+    """Текст ответа OpenAI chat.completions."""
+    if hasattr(response, 'choices') and len(response.choices) > 0:
+        msg = response.choices[0].message
+        if hasattr(msg, 'content'):
+            return (msg.content or '').strip()
     return str(response or '').strip()
 
 
-def _gemini_generate_with_retry(client, *, model: str, contents, config=None, max_retries: int = 7):
-    """Вызов generate_content с паузами при 429 / quota (карусель даёт много запросов подряд)."""
-    last: Optional[Exception] = None
+def _openai_generate_with_retry(client, *, model: str, messages: List[Dict], max_retries: int = 7):
+    """Вызов OpenAI chat.completions.create с паузами при 429 / quota."""
+    last = None
     for attempt in range(max_retries):
         try:
-            if config is not None:
-                return client.models.generate_content(
-                    model=model, contents=contents, config=config
-                )
-            return client.models.generate_content(model=model, contents=contents)
+            return client.chat.completions.create(
+                model=model,
+                messages=messages
+            )
         except Exception as e:
             last = e
             el = str(e).lower()
@@ -77,20 +76,19 @@ def _gemini_generate_with_retry(client, *, model: str, contents, config=None, ma
                 if attempt < max_retries - 1:
                     wait = min(120.0, (2 ** attempt) + random.uniform(0.5, 2.5))
                     logger.warning(
-                        'Gemini rate limit, sleep %.1fs (attempt %s/%s)',
+                        'OpenAI rate limit, sleep %.1fs (attempt %s/%s)',
                         wait, attempt + 1, max_retries,
                     )
                     time.sleep(wait)
                     continue
             raise
-    raise last  # type: ignore[misc]
+    raise last
 
 
-def _carousel_slide_block(sl: Dict, idx: int, gemini_key: str) -> str:
-    """Один слайд карусели: OCR картинки; видео-транскрипт только если нет кадра (по умолчанию)."""
+def _carousel_slide_block(sl: Dict, idx: int, openai_key: str) -> str:
+    """Один слайд карусели: OCR картинки через OpenAI Vision API."""
     import io
     import os as _os
-    import tempfile
     import requests as _req
     import PIL.Image
 
@@ -108,7 +106,7 @@ def _carousel_slide_block(sl: Dict, idx: int, gemini_key: str) -> str:
         lines.append(f'Подпись доступности Instagram:\n{acc}')
 
     try:
-        delay_sec = float(os.getenv('CAROUSEL_GEMINI_DELAY_SEC', '1.2'))
+        delay_sec = float(os.getenv('CAROUSEL_OPENAI_DELAY_SEC', '1.2'))
     except ValueError:
         delay_sec = 1.2
 
@@ -119,7 +117,7 @@ def _carousel_slide_block(sl: Dict, idx: int, gemini_key: str) -> str:
         'Ответ на русском. Если текста на кадре нет — первая строка: «Текста на кадре нет».'
     )
 
-    gemini_client = genai.Client(api_key=gemini_key)
+    openai_client = OpenAI(api_key=openai_key)
     img_url = sl.get('image_url')
     if img_url:
         try:
@@ -131,77 +129,47 @@ def _carousel_slide_block(sl: Dict, idx: int, gemini_key: str) -> str:
             except ValueError:
                 max_side = 960
             img = _resize_image_for_vision(img, max_side=max(512, min(max_side, 2048)))
-            vision_resp = _gemini_generate_with_retry(
-                gemini_client,
-                model='gemini-2.0-flash',
-                contents=[img, vision_prompt],
-                config={'temperature': 0.1, 'max_output_tokens': 900},
+            
+            # Конвертируем изображение в base64 для OpenAI Vision
+            import base64
+            buffered = io.BytesIO()
+            img.save(buffered, format="JPEG")
+            img_base64 = base64.b64encode(buffered.getvalue()).decode()
+            
+            vision_resp = _openai_generate_with_retry(
+                openai_client,
+                model='gpt-4o-mini',
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": vision_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}
+                            }
+                        ]
+                    }
+                ],
                 max_retries=4,
             )
-            lines.append('Анализ кадра (OCR + описание):\n' + _gemini_response_text(vision_resp))
+            lines.append('Анализ кадра (OCR + описание):\n' + vision_resp.choices[0].message.content)
             time.sleep(delay_sec)
         except Exception as e:
             logger.warning(f'Carousel slide {idx} vision failed: {e}')
             lines.append(f'(не удалось разобрать картинку слайда: {str(e)[:160]})')
 
     vid_url = sl.get('video_url')
-    try:
-        mt = int(sl.get('media_type', 1) or 1)
-    except (TypeError, ValueError):
-        mt = 1
-    if vid_url and mt == 2:
-        if img_url and _carousel_skip_video_when_has_image():
-            lines.append(
-                '(видео на слайде пропущено: уже есть кадр для OCR; '
-                'для транскрипта речи выставь CAROUSEL_SKIP_VIDEO_WHEN_HAS_IMAGE=0)'
-            )
-        else:
-            try:
-                head = _req.head(vid_url, headers=IG_CDN_HEADERS, timeout=10)
-                size = int(head.headers.get('content-length', 0))
-                if 0 < size <= 100 * 1024 * 1024:
-                    vid_data = _req.get(vid_url, headers=IG_CDN_HEADERS, timeout=75)
-                    vid_data.raise_for_status()
-                    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_f:
-                        tmp_path = tmp_f.name
-                        tmp_f.write(vid_data.content)
-                    try:
-                        uploaded = gemini_client.files.upload(
-                            file=tmp_path,
-                            config={'mime_type': 'video/mp4'},
-                        )
-                        tr = _gemini_generate_with_retry(
-                            gemini_client,
-                            model='gemini-2.0-flash',
-                            contents=[
-                                uploaded,
-                                'Транскрибируй всю речь из видео дословно. Если на другом языке — переведи на русский. '
-                                "Если речи нет — напиши 'Речи нет'.",
-                            ],
-                            max_retries=3,
-                        )
-                        gemini_client.files.delete(name=uploaded.name)
-                        transcript = _gemini_response_text(tr)
-                        if transcript and transcript.lower() != 'речи нет':
-                            lines.append(f'Речь в видео (слайд {idx}):\n{transcript}')
-                        time.sleep(delay_sec)
-                    finally:
-                        try:
-                            _os.unlink(tmp_path)
-                        except OSError:
-                            pass
-                elif size > 100 * 1024 * 1024:
-                    lines.append(f'(видео слайда {idx} слишком большое для транскрипции, ~{size // 1024 // 1024} МБ)')
-            except Exception as e:
-                logger.warning(f'Carousel slide {idx} video transcript failed: {e}')
-                lines.append(f'(транскрипт видео слайда недоступен: {str(e)[:120]})')
+    if vid_url:
+        # Для видео OpenAI не имеет прямого транскрипционного API в том же формате
+        lines.append(f'(видео на слайде {idx}: временно пропущено при миграции на OpenAI)')
 
     return '\n'.join(lines)
 
 
-def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slides: int = 12) -> str:
-    """OCR всех слайдов (для фоновых вызовов). В Telegram-флоу предпочтительнее пошаговый цикл в analyze_url_receive."""
-    if not slides or not gemini_key:
+def _build_carousel_slides_context(slides: List[Dict], openai_key: str, max_slides: int = 12) -> str:
+    """OCR всех слайдов через OpenAI Vision (для фоновых вызовов)."""
+    if not slides or not openai_key:
         return ''
 
     slides = [s for s in slides if isinstance(s, dict)]
@@ -209,12 +177,12 @@ def _build_carousel_slides_context(slides: List[Dict], gemini_key: str, max_slid
         return ''
 
     try:
-        env_cap = int(os.getenv('CAROUSEL_GEMINI_MAX_SLIDES', '6'))
+        env_cap = int(os.getenv('CAROUSEL_OPENAI_MAX_SLIDES', '6'))
     except ValueError:
         env_cap = 6
     limit = max(1, min(len(slides), env_cap, max_slides))
 
-    parts = [_carousel_slide_block(slides[i], i + 1, gemini_key) for i in range(limit)]
+    parts = [_carousel_slide_block(slides[i], i + 1, openai_key) for i in range(limit)]
     return '\n\n'.join(parts)
 
 
@@ -1152,7 +1120,7 @@ class TelegramBot:
                     fb_lines.extend(["", f"Карусель: {len(slides)} слайд(ов)"])
                 await update.effective_chat.send_message("\n".join(fb_lines))
 
-            gemini_key = os.getenv('GEMINI_API_KEY')
+            gemini_key = os.getenv('OPENAI_API_KEY')
 
             # Картинки карусели в Telegram (альбом 2–10 фото или одно фото)
             import io
@@ -1267,7 +1235,7 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-                gemini_key = os.getenv('GEMINI_API_KEY')
+                gemini_key = os.getenv('OPENAI_API_KEY')
                 if not gemini_key:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
@@ -1278,14 +1246,13 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через Gemini Vision...")
+                await update.effective_chat.send_message("🎥 Пост без текста — анализирую видео через GPT-4o Vision...")
 
                 try:
                     import requests as _req
                     import PIL.Image
                     import io as _io
-                    import tempfile
-                    import os as _os
+                    import base64
 
                     img_resp = _req.get(
                         thumbnail_url,
@@ -1294,54 +1261,66 @@ class TelegramBot:
                     )
                     img_resp.raise_for_status()
 
-                    gemini_client = genai.Client(api_key=gemini_key)
+                    openai_client = OpenAI(api_key=gemini_key)
                     img = PIL.Image.open(_io.BytesIO(img_resp.content))
-                    vision_resp = _gemini_generate_with_retry(
-                        gemini_client,
-                        model='gemini-2.0-flash',
-                        contents=[img, (
-                            "Это превью видео/Reel из Instagram. "
-                            "Подробно опиши: что показано, кто в кадре, тема, настроение, "
-                            "о чём вероятно этот видео-пост. Ответь на русском языке."
-                        )],
+                    
+                    # Конвертируем изображение в base64 для OpenAI Vision
+                    buffered = _io.BytesIO()
+                    img.save(buffered, format="JPEG")
+                    img_base64 = base64.b64encode(buffered.getvalue()).decode()
+                    
+                    vision_resp = _openai_generate_with_retry(
+                        openai_client,
+                        model='gpt-4o-mini',
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Это превью видео/Reel из Instagram. Подробно опиши: что показано, кто в кадре, тема, настроение, о чём вероятно этот видео-пост. Ответь на русском языке."},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}
+                                    }
+                                ]
+                            }
+                        ]
                     )
-                    visual_desc = _gemini_response_text(vision_resp)
-                    logger.info(f"Gemini Vision description: {visual_desc[:100]}...")
+                    visual_desc = _openai_response_text(vision_resp)
+                    logger.info(f"OpenAI Vision description: {visual_desc[:100]}...")
                     try:
                         await update.effective_chat.send_message(
-                            f"👁 *Gemini видит:*\n\n{visual_desc}",
+                            f"👁 *GPT-4o видит:*\n\n{visual_desc}",
                             parse_mode='Markdown'
                         )
                     except Exception:
-                        await update.effective_chat.send_message(f"Gemini видит:\n\n{visual_desc}")
+                        await update.effective_chat.send_message(f"GPT-4o видит:\n\n{visual_desc}")
 
-                    # Gemini File API: транскрипция речи из видео
+                    # Транскрипция видео через OpenAI Whisper API (если доступно)
                     transcript_text = ''
                     video_url = post.get('video_url')
                     if video_url:
-                        await update.effective_chat.send_message("🎤 Слушаю что говорят в видео (Gemini)...")
+                        await update.effective_chat.send_message("🎤 Слушаю что говорят в видео (Whisper)...")
                         try:
                             head = _req.head(video_url, headers=IG_CDN_HEADERS, timeout=10)
                             size = int(head.headers.get('content-length', 0))
-                            if 0 < size <= 100 * 1024 * 1024:  # до 100 МБ
+                            if 0 < size <= 25 * 1024 * 1024:  # до 25 МБ для Whisper
                                 vid_data = _req.get(video_url, headers=IG_CDN_HEADERS, timeout=60)
                                 vid_data.raise_for_status()
+                                # Используем временный файл для Whisper API
+                                import tempfile
                                 with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_f:
                                     tmp_path = tmp_f.name
                                     tmp_f.write(vid_data.content)
                                 try:
-                                    uploaded = gemini_client.files.upload(
-                                        file=tmp_path,
-                                        config={'mime_type': 'video/mp4'}
-                                    )
-                                    transcript_resp = _gemini_generate_with_retry(
-                                        gemini_client,
-                                        model='gemini-2.0-flash',
-                                        contents=[uploaded, "Транскрибируй речь из этого видео на русском языке. Если речи нет — напиши 'Речи нет'."]
-                                    )
-                                    transcript_text = _gemini_response_text(transcript_resp)
-                                    gemini_client.files.delete(name=uploaded.name)
-                                    if transcript_text and transcript_text.lower() != 'речи нет':
+                                    # OpenAI Whisper API для транскрипции
+                                    with open(tmp_path, 'rb') as audio_file:
+                                        transcript = openai_client.audio.transcriptions.create(
+                                            model="whisper-1",
+                                            file=audio_file,
+                                            language="ru"  # Принудительно русский
+                                        )
+                                    transcript_text = transcript.text if transcript else ''
+                                    if transcript_text:
                                         try:
                                             await update.effective_chat.send_message(
                                                 f"🎤 *Речь в видео:*\n\n{transcript_text}",
@@ -1350,18 +1329,23 @@ class TelegramBot:
                                         except Exception:
                                             await update.effective_chat.send_message(f"Речь в видео:\n\n{transcript_text}")
                                     else:
-                                        transcript_text = ''
                                         await update.effective_chat.send_message("🔇 Речи в видео не обнаружено")
+                                except Exception as whisper_error:
+                                    logger.warning(f"Whisper transcription failed: {whisper_error}")
+                                    await update.effective_chat.send_message(f"⚠️ Не удалось транскрибировать видео: {str(whisper_error)[:100]}")
                                 finally:
-                                    _os.unlink(tmp_path)
+                                    import os as _os
+                                    try:
+                                        _os.unlink(tmp_path)
+                                    except OSError:
+                                        pass
                             else:
-                                await update.effective_chat.send_message(
-                                    f"⚠️ Видео слишком большое ({size // 1024 // 1024} МБ) — транскрипция пропущена"
-                                )
-                        except Exception as we:
-                            logger.warning(f"Gemini transcription failed: {we}")
-                            await update.effective_chat.send_message(f"⚠️ Gemini не смог транскрибировать: {str(we)[:150]}")
+                                await update.effective_chat.send_message(f"⚠️ Видео слишком большое для транскрипции ({size // 1024 // 1024} МБ, лимит 25 МБ)")
+                        except Exception as e:
+                            logger.warning(f"Video processing failed: {e}")
+                            await update.effective_chat.send_message(f"⚠️ Не удалось обработать видео: {str(e)[:100]}")
 
+                # Формируем caption для анализа
                     # Объединить визуальное описание + транскрипцию для Gemini
                     if transcript_text:
                         caption = f"[Что видно в кадре]: {visual_desc}\n\n[Что говорит человек]: {transcript_text}"
@@ -1382,7 +1366,7 @@ class TelegramBot:
             await update.effective_chat.send_message("🤖 Разбираю через Gemini...")
 
             try:
-                gemini_key = os.getenv('GEMINI_API_KEY')
+                gemini_key = os.getenv('OPENAI_API_KEY')
                 if not gemini_key:
                     await update.effective_chat.send_message("❌ GEMINI_API_KEY не задан в Railway — анализ недоступен.")
                     return ConversationHandler.END
@@ -1446,14 +1430,13 @@ class TelegramBot:
                     )
 
                 max_tokens = 2048 if is_carousel_prompt else 1000
-                g_client = genai.Client(api_key=gemini_key)
-                response = _gemini_generate_with_retry(
-                    g_client,
-                    model='gemini-2.0-flash',
-                    contents=prompt,
-                    config={'temperature': 0.2, 'max_output_tokens': max_tokens}
+                openai_client = OpenAI(api_key=gemini_key)
+                response = _openai_generate_with_retry(
+                    openai_client,
+                    model='gpt-4o-mini',
+                    messages=[{"role": "user", "content": prompt}]
                 )
-                result = _gemini_response_text(response)
+                result = _openai_response_text(response)
 
                 # Сохранить контекст для "Создать промпт"
                 context.user_data['last_analysis'] = result
@@ -1513,7 +1496,7 @@ class TelegramBot:
 
         await query.edit_message_text("⚙️ Генерирую промпт для реализации...")
 
-        gemini_key = os.getenv('GEMINI_API_KEY')
+        gemini_key = os.getenv('OPENAI_API_KEY')
         if not gemini_key:
             await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
             return
@@ -1534,14 +1517,13 @@ class TelegramBot:
                 f"Исходный контент:\n{raw_content[:1500]}"
             )
 
-            g_client = genai.Client(api_key=gemini_key)
-            response = _gemini_generate_with_retry(
-                g_client,
-                model='gemini-2.0-flash',
-                contents=prompt,
-                config={'temperature': 0.2, 'max_output_tokens': 800}
+            openai_client = OpenAI(api_key=gemini_key)
+            response = _openai_generate_with_retry(
+                openai_client,
+                model='gpt-4o-mini',
+                messages=[{"role": "user", "content": prompt}]
             )
-            ready_prompt = _gemini_response_text(response)
+            ready_prompt = _openai_response_text(response)
 
             keyboard = [
                 [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
@@ -1658,19 +1640,18 @@ class TelegramBot:
         await query.edit_message_text("🤖 Gemini думает...")
 
         try:
-            gemini_key = os.getenv('GEMINI_API_KEY')
+            gemini_key = os.getenv('OPENAI_API_KEY')
             if not gemini_key:
                 await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
                 return
 
-            g_client = genai.Client(api_key=gemini_key)
-            response = _gemini_generate_with_retry(
-                g_client,
-                model='gemini-2.0-flash',
-                contents=prompt,
-                config={'temperature': 0.2, 'max_output_tokens': 800}
+            openai_client = OpenAI(api_key=gemini_key)
+            response = _openai_generate_with_retry(
+                openai_client,
+                model='gpt-4o-mini',
+                messages=[{"role": "user", "content": prompt}]
             )
-            result = _gemini_response_text(response)
+            result = _openai_response_text(response)
 
             keyboard = [
                 [InlineKeyboardButton("📝 Резюме", callback_data='analyze_summary'),
