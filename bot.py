@@ -1119,7 +1119,16 @@ class TelegramBot:
                 post = await asyncio.to_thread(self.parser.get_post_by_url, url)
             else:
                 # YouTube или TikTok через MediaParser
-                post = await asyncio.to_thread(self.media_parser.get_video_info, url)
+                logger.info(f"Пытаемся распарсить {platform}: {url}")
+                try:
+                    post = await asyncio.to_thread(self.media_parser.get_video_info, url)
+                    logger.info(f"Результат парсинга {platform}: {bool(post)}")
+                except Exception as e:
+                    logger.error(f"Ошибка при парсинге {platform}: {e}", exc_info=True)
+                    await status_msg.edit_text(
+                        f"❌ Ошибка парсинга {platform}: {str(e)[:200]}"
+                    )
+                    return ConversationHandler.END
 
             if not post:
                 await status_msg.edit_text(
