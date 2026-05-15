@@ -1439,9 +1439,9 @@ class TelegramBot:
                 )
                 result = _openai_response_text(response)
 
-                # Сохранить контекст для "Создать промпт"
+                # Сохранить контекст для "Создать промпт" - полный словарь поста
                 context.user_data['last_analysis'] = result
-                context.user_data['last_raw_content'] = caption
+                context.user_data['last_raw_content'] = post
 
                 keyboard = [
                     [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt')],
