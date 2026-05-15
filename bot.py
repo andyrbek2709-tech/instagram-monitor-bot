@@ -1078,9 +1078,9 @@ class TelegramBot:
             re.IGNORECASE,
         )
 
-        # Проверяем TikTok ссылки
+        # Проверяем TikTok ссылки (включая короткие vt.tiktok.com)
         tt_full = re.search(
-            r'(https?://(?:www\.)?tiktok\.com/@[\w.-]+/video/\d+[^\s]*)',
+            r'(https?://(?:www\.|vt\.)?tiktok\.com/[^\s]+)',
             text,
             re.IGNORECASE,
         )
@@ -1093,7 +1093,7 @@ class TelegramBot:
                 "Нужна ссылка вида:\n"
                 "- `https://www.instagram.com/p/...` или `/reel/...`\n"
                 "- `https://youtube.com/watch?v=...` или `/shorts/...`\n"
-                "- `https://tiktok.com/@username/video/...`\n\n"
+                "- `https://tiktok.com/@username/video/...` или `vt.tiktok.com/...`\n\n"
                 "Попробуй ещё раз или /cancel",
                 parse_mode='Markdown'
             )
@@ -1629,8 +1629,8 @@ class TelegramBot:
         # Проверяем YouTube ссылки
         yt_match = re.search(r'(https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/|m\.youtube\.com/(?:watch\?v=|shorts/))([A-Za-z0-9_-]+))', text)
 
-        # Проверяем TikTok ссылки
-        tt_match = re.search(r'https?://(?:www\.)?tiktok\.com/@[\w.-]+/video/(\d+)', text)
+        # Проверяем TikTok ссылки (включая короткие vt.tiktok.com)
+        tt_match = re.search(r'https?://(?:www\.|vt\.)?tiktok\.com/[^\s]+', text)
 
         if not ig_match and not yt_match and not tt_match:
             return
