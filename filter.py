@@ -6,9 +6,10 @@ import time
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import google.genai as genai
-
-logger = logging.getLogger(__name__)
-
+from google.genai.errors import APIError
+import time
+import json
+import logging
 MAX_FILTER_RETRIES = 3
 FILTER_RETRY_DELAY = 2
 
@@ -47,7 +48,7 @@ class ContentFilter:
         self.gemini_api_key = gemini_api_key
 
     def _gemini_quick_classify(self, caption: str) -> Dict[str, bool]:
-        """Быстрая классификация через Gemini с retry"""
+        """Быстрая классификация через Gemini с retry (вкл. 429)"""
         for attempt in range(MAX_FILTER_RETRIES):
             try:
                 client = genai.Client(api_key=self.gemini_api_key)
@@ -62,6 +63,17 @@ class ContentFilter:
                 )
                 result_text = response.text.strip()
                 return json.loads(result_text)
+            except APIError as e:
+                if e.code == 429:
+                    wait_time = FILTER_RETRY_DELAY * (2 ** attempt)
+                    logger.warning(f"Quota exceeded (429), retrying {attempt+1}/{MAX_FILTER_RETRIES} in {wait_time}s...")
+                    if attempt < MAX_FILTER_RETRIES - 1:
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"Quota exhausted after {MAX_FILTER_RETRIES} attempts")
+                        return {"is_ad": False, "is_greeting": False, "is_personal": False}
+                raise e
             except json.JSONDecodeError as e:
                 logger.warning(f"Gemini JSON error on attempt {attempt + 1}: {e}")
                 if attempt < MAX_FILTER_RETRIES - 1:

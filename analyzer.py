@@ -5,9 +5,10 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import google.genai as genai
+from google.genai.errors import APIError
 import time
-
-logger = logging.getLogger(__name__)
+import json
+import logging
 
 MAX_RETRIES = 3
 RETRY_DELAY = 2
@@ -47,7 +48,7 @@ class TextAnalyzer:
         self.gemini_api_key = gemini_api_key
 
     def analyze_sentiment(self, text: str) -> Tuple[str, float]:
-        """Анализировать sentiment через Gemini с retry"""
+        """Анализировать sentiment через Gemini с retry (вкл. 429)"""
         prompt = (
             "Ты — Gemini AI. Проанализируй тон этого текста и верни только JSON:\n"
             "{\"sentiment\": \"positive\"|\"negative\"|\"neutral\", \"confidence\": 0.0-1.0}\n\n"
@@ -65,6 +66,17 @@ class TextAnalyzer:
                 result_text = response.text.strip()
                 result = json.loads(result_text)
                 return result.get('sentiment', 'neutral'), result.get('confidence', 0.5)
+            except APIError as e:
+                if e.code == 429:
+                    wait_time = RETRY_DELAY * (2 ** attempt) # Exponential backoff
+                    logger.warning(f"Quota exceeded (429), retrying {attempt+1}/{MAX_RETRIES} in {wait_time}s...")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"Quota exhausted after {MAX_RETRIES} attempts")
+                        return 'neutral', 0.5
+                raise e
             except (json.JSONDecodeError, KeyError, AttributeError) as e:
                 logger.warning(f"Sentiment analysis JSON error on attempt {attempt + 1}: {e}")
                 if attempt < MAX_RETRIES - 1:
