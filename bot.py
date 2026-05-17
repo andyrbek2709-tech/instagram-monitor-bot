@@ -1499,6 +1499,7 @@ class TelegramBot:
                 # Сохранить контекст для "Создать промпт" - полный словарь поста
                 context.user_data['last_analysis'] = result
                 context.user_data['last_raw_content'] = post
+                context.user_data['last_post'] = post
 
                 keyboard = [
                     [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt'),
