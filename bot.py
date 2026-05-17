@@ -999,7 +999,7 @@ class TelegramBot:
 *🔗 РАЗОБРАТЬ ПОСТ ПО ССЫЛКЕ*
 ─────────────────
 Нажми кнопку → отправь ссылку на любой пост или Reel.
-Бот покажет текст поста и сделает разбор через Gemini:
+Бот покажет текст поста и сделает разбор через AI:
 • О чём пост (суть в 1–2 предложениях)
 • Ключевые идеи
 • Как использовать для своего контента
@@ -1415,13 +1415,13 @@ class TelegramBot:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
-                        f"❌ Gemini Vision не смог проанализировать видео: {str(ve)[:200]}",
+                        f"❌ Не удалось проанализировать видео: {str(ve)[:200]}",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     return ConversationHandler.END
 
             # Автоматический анализ через Gemini
-            await update.effective_chat.send_message("🤖 Разбираю через Gemini...")
+            await update.effective_chat.send_message("🤖 Разбираю...")
 
             try:
                 gemini_key = os.getenv('OPENAI_API_KEY')
@@ -1522,9 +1522,9 @@ class TelegramBot:
                 el = str(e).lower()
                 if any(x in el for x in ('429', 'resource_exhausted', 'quota')):
                     await update.effective_chat.send_message(
-                        "❌ Превышен лимит запросов Gemini (429). Подожди 1–2 минуты или проверь квоту в "
-                        "Google AI Studio (aistudio.google.com). Для длинных каруселей в Railway задай переменные "
-                        "CAROUSEL_GEMINI_MAX_SLIDES=4 и CAROUSEL_GEMINI_DELAY_SEC=3."
+                        "❌ Превышен лимит запросов AI (429). Подожди 1–2 минуты или проверь квоту. "
+                        "Для длинных каруселей в Railway задай переменные "
+                        "CAROUSEL_MAX_SLIDES=4 и CAROUSEL_DELAY_SEC=3."
                     )
                 else:
                     await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
@@ -1740,7 +1740,7 @@ class TelegramBot:
         }
 
         prompt = prompts.get(action, prompts['analyze_summary'])
-        await query.edit_message_text("🤖 Gemini думает...")
+        await query.edit_message_text("🤖 Анализирую...")
 
         try:
             gemini_key = os.getenv('OPENAI_API_KEY')
@@ -1776,7 +1776,7 @@ class TelegramBot:
 
         except Exception as e:
             logger.error(f"analyze_post_action error: {e}", exc_info=True)
-            await query.edit_message_text(f"❌ Ошибка Gemini: {str(e)[:300]}")
+            await query.edit_message_text(f"❌ Ошибка анализа: {str(e)[:300]}")
 
     def setup(self) -> Application:
         """Настроить приложение Telegram"""
