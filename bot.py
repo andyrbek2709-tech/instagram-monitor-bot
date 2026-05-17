@@ -1501,7 +1501,8 @@ class TelegramBot:
                 context.user_data['last_raw_content'] = post
 
                 keyboard = [
-                    [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt')],
+                    [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt'),
+                     InlineKeyboardButton("🔬 Реверс-инжиниринг", callback_data='reverse_engineer')],
                     [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
                     [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
                 ]
@@ -1687,6 +1688,7 @@ class TelegramBot:
                 [InlineKeyboardButton("📝 Краткое резюме", callback_data='analyze_summary')],
                 [InlineKeyboardButton("💡 Идеи для контента", callback_data='analyze_ideas')],
                 [InlineKeyboardButton("🌐 Перевести и адаптировать", callback_data='analyze_adapt')],
+                [InlineKeyboardButton("🔬 Реверс-инжиниринг", callback_data='reverse_engineer')],
             ]
             try:
                 await msg.edit_text(
@@ -1776,6 +1778,96 @@ class TelegramBot:
 
         except Exception as e:
             logger.error(f"analyze_post_action error: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка анализа: {str(e)[:300]}")
+
+    async def reverse_engineer_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reverse engineering анализ поста — восстановить технологии, архитектуру и workflow"""
+        query = update.callback_query
+        await query.answer()
+
+        post = context.user_data.get('last_post')
+        if not post:
+            await query.edit_message_text("❌ Пост не найден. Отправь ссылку заново.")
+            return
+
+        caption = post.get('caption') or post.get('description') or ''
+        account = post.get('account') or post.get('channel') or post.get('uploader') or 'неизвестно'
+        likes = post.get('likes', 0) or post.get('like_count', 0)
+        comments = post.get('comments', 0) or post.get('comment_count', 0)
+
+        await query.edit_message_text("🔬 Анализирую архитектуру...")
+
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            await query.edit_message_text("❌ API ключ не задан в Railway")
+            return
+
+        try:
+            system_prompt = (
+                "Ты — AI Reverse Engineering Analyst. Анализируешь контент как reverse engineer: "
+                "восстанавливаешь скрытые технологии, workflow, архитектуру и AI-механику. "
+                "НЕ пересказывай контент. НЕ фокусируйся на маркетинге, курсах, CTA, эмоциях. "
+                "Ищи: реальный стек, автоматизацию, AI-агенты, orchestration, hidden infrastructure. "
+                "Если информации мало — достраивай архитектуру гипотезами на основе косвенных признаков."
+            )
+
+            user_prompt = (
+                "Проведи технический реверс-инжиниринг. "
+                "Ответь строго в формате (каждая секция — 2–5 строк, без воды, максимум конкретики):\n\n"
+                "1. CORE SYSTEM IDEA\n"
+                "Что на самом деле демонстрирует автор — не тема поста, а суть системы.\n\n"
+                "2. HIDDEN MECHANISM\n"
+                "Какая реальная механика скрыта за контентом.\n\n"
+                "3. IMPLIED ARCHITECTURE\n"
+                "Как вероятно устроена система технически (компоненты, связи, паттерны).\n\n"
+                "4. AUTOMATION & AGENT PATTERNS\n"
+                "Какие automation/AI-agent подходы используются или подразумеваются.\n\n"
+                "5. TOOLS / STACK\n"
+                "Конкретные технологии, API, библиотеки, AI-модели, сервисы.\n\n"
+                "6. WORKFLOW RECONSTRUCTION\n"
+                "Полный workflow от начала до конца — пошагово.\n\n"
+                "7. WHAT IS NOT SHOWN\n"
+                "Что автор скрывает, но что почти наверняка существует в системе.\n\n"
+                "8. HOW TO REBUILD IT\n"
+                "Как реализовать подобную систему — конкретный план без воды.\n\n"
+                f"--- КОНТЕНТ ---\n"
+                f"Аккаунт: {account} | Лайки: {likes} | Комментарии: {comments}\n\n"
+                f"{caption[:4000] if caption else '(текст отсутствует — только медиа)'}"
+            )
+
+            openai_client = OpenAI(api_key=api_key)
+            response = _openai_generate_with_retry(
+                openai_client,
+                model='gpt-4o-mini',
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=1800,
+            )
+            result = _openai_response_text(response)
+
+            context.user_data['last_analysis'] = result
+
+            keyboard = [
+                [InlineKeyboardButton("📝 Создать промпт", callback_data='create_prompt')],
+                [InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url')],
+                [InlineKeyboardButton("🔙 Главное меню", callback_data='back')],
+            ]
+            try:
+                await query.edit_message_text(
+                    f"🔬 *Reverse Engineering:*\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                await query.edit_message_text(
+                    f"🔬 Reverse Engineering:\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+        except Exception as e:
+            logger.error(f"reverse_engineer_action error: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Ошибка анализа: {str(e)[:300]}")
 
     def setup(self) -> Application:
@@ -1878,6 +1970,11 @@ class TelegramBot:
         # Создать промпт для реализации
         self.application.add_handler(
             CallbackQueryHandler(self.create_prompt_action, pattern='^create_prompt$')
+        )
+
+        # Реверс-инжиниринг поста
+        self.application.add_handler(
+            CallbackQueryHandler(self.reverse_engineer_action, pattern='^reverse_engineer$')
         )
 
         return self.application
