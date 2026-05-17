@@ -1843,7 +1843,6 @@ class TelegramBot:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_tokens=1800,
             )
             result = _openai_response_text(response)
 
