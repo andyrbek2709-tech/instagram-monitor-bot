@@ -15,7 +15,7 @@ Telegram-бот для мониторинга и анализа постов Ins
 main.py          — запуск и оркестрация
 bot.py           — Telegram интерфейс (все команды и кнопки)
 parser.py        — HikerAPIClient + Parser (получение постов)
-filter.py        — классификация контента через GPT (реклама/личное)
+filter.py        — классификация контента через Gemini (реклама/личное)
 analyzer.py      — анализ через Gemini (sentiment, темы, релевантность)
 db_init.py       — создание таблиц PostgreSQL
 validator.py     — проверка стейла аккаунтов через БД
@@ -27,8 +27,8 @@ maintenance.py   — очистка старых данных
 | Компонент | Решение |
 |-----------|---------|
 | Instagram парсинг | HikerAPI (hikerapi.com) — без прямого логина |
-| AI анализ | OpenAI Gemini (gemini-1.5) |
-| Контент-фильтр | OpenAI Gemini (gemini-1.5, опционально) |
+| AI анализ | Google Gemini (gemini-2.0-flash) |
+| Контент-фильтр | Google Gemini (опционально) |
 | БД | PostgreSQL (Railway Postgres) |
 | Хостинг | Railway.app |
 | Telegram | python-telegram-bot 20.x |
@@ -41,7 +41,7 @@ maintenance.py   — очистка старых данных
 - `HIKER_API_KEY` — от hikerapi.com (есть бесплатный триал $2)
 
 **Опциональные:**
-- `GEMINI_API_KEY` — для AI-анализа постов, Vision и Whisper
+- `GEMINI_API_KEY` — для AI-анализа постов, Vision и транскрипции видео
 
 ## Деплой на Railway
 
@@ -57,7 +57,7 @@ maintenance.py   — очистка старых данных
 |---------|-----------|
 | `monitored_accounts` | аккаунты на мониторинге |
 | `posts` | спарсенные посты |
-| `filter_results` | результаты GPT-классификации |
+| `filter_results` | результаты Gemini-классификации |
 | `analyses` | AI-анализ (sentiment, темы, релевантность) |
 | `daily_stats` | дневная статистика |
 | `telegram_users` | пользователи бота |
