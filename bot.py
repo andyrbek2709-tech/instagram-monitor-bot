@@ -30,7 +30,7 @@ IG_CDN_HEADERS = {
 
 
 def _resize_image_for_vision(img, max_side: int = 960):
-    """Уменьшить кадр перед Vision — меньше полезной нагрузки и обычно быстрее ответ Gemini."""
+    """Уменьшить кадр перед Vision — меньше полезной нагрузки и обычно быстрее ответ OpenAI."""
     try:
         import PIL.Image
 
@@ -1057,7 +1057,7 @@ class TelegramBot:
         return WAIT_URL
 
     async def analyze_url_receive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Получить ссылку, спарсить пост и автоматически разобрать через Gemini (Instagram, YouTube, TikTok)"""
+        """Получить ссылку, спарсить пост и автоматически разобрать через OpenAI (Instagram, YouTube, TikTok)"""
         text = update.message.text.strip()
 
         # Проверяем Instagram ссылки
@@ -1190,7 +1190,7 @@ class TelegramBot:
                     fb_lines.extend(["", f"Карусель: {len(slides)} слайд(ов)"])
                 await update.effective_chat.send_message("\n".join(fb_lines))
 
-            gemini_key = os.getenv('OPENAI_API_KEY')
+            openai_key = os.getenv('OPENAI_API_KEY')
 
             # Картинки карусели в Telegram (альбом 2–10 фото или одно фото)
             import io
@@ -1225,15 +1225,15 @@ class TelegramBot:
                 except Exception as pe:
                     logger.warning(f'send_photo carousel: {pe}')
 
-            if slides and not gemini_key:
+            if slides and not openai_key:
                 await update.effective_chat.send_message(
                     "⚠️ Чтобы прочитать текст с картинок и речь в видео-слайдах карусели, "
-                    "нужен `GEMINI_API_KEY` в переменных окружения."
+                    "нужен `OPENAI_API_KEY` в переменных окружения."
                 )
 
-            if slides and gemini_key:
+            if slides and openai_key:
                 try:
-                    env_cap = int(os.getenv('CAROUSEL_GEMINI_MAX_SLIDES', '6'))
+                    env_cap = int(os.getenv('CAROUSEL_MAX_SLIDES', '6'))
                 except ValueError:
                     env_cap = 6
                 limit = max(1, min(len(slides), env_cap))
@@ -1260,7 +1260,7 @@ class TelegramBot:
                         pass
                     try:
                         block = await asyncio.wait_for(
-                            asyncio.to_thread(_carousel_slide_block, slides[i], i + 1, gemini_key),
+                            asyncio.to_thread(_carousel_slide_block, slides[i], i + 1, openai_key),
                             timeout=slide_timeout,
                         )
                     except asyncio.TimeoutError:
@@ -1287,7 +1287,7 @@ class TelegramBot:
                     else:
                         caption = "=== Содержимое слайдов карусели ===\n" + carousel_ctx
 
-            # Если нет текста — попробовать Gemini Vision по thumbnail
+            # Если нет текста — попробовать OpenAI Vision по thumbnail
             if not caption.strip():
                 thumbnail_url = post.get('thumbnail_url')
                 if not thumbnail_url and slides:
@@ -1305,12 +1305,12 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-                gemini_key = os.getenv('OPENAI_API_KEY')
-                if not gemini_key:
+                openai_key = os.getenv('OPENAI_API_KEY')
+                if not openai_key:
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
-                        "⚠️ Пост без текста — нужен GEMINI_API_KEY для анализа видео через GPT-4o Vision.\n"
+                        "⚠️ Пост без текста — нужен OPENAI_API_KEY для анализа видео через GPT-4o Vision.\n"
                         "Добавь его в Railway Variables.",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
@@ -1331,7 +1331,7 @@ class TelegramBot:
                     )
                     img_resp.raise_for_status()
 
-                    openai_client = OpenAI(api_key=gemini_key)
+                    openai_client = OpenAI(api_key=openai_key)
                     img = PIL.Image.open(_io.BytesIO(img_resp.content))
                     
                     # Конвертируем изображение в base64 для OpenAI Vision
@@ -1416,14 +1416,14 @@ class TelegramBot:
                             await update.effective_chat.send_message(f"⚠️ Не удалось обработать видео: {str(e)[:100]}")
 
                 # Формируем caption для анализа
-                    # Объединить визуальное описание + транскрипцию для Gemini
+                    # Объединить визуальное описание + транскрипцию для OpenAI
                     if transcript_text:
                         caption = f"[Что видно в кадре]: {visual_desc}\n\n[Что говорит человек]: {transcript_text}"
                     else:
                         caption = visual_desc
 
                 except Exception as ve:
-                    logger.error(f"Gemini Vision error: {ve}", exc_info=True)
+                    logger.error(f"OpenAI Vision error: {ve}", exc_info=True)
                     keyboard = [[InlineKeyboardButton("🔗 Разобрать другой пост", callback_data='analyze_url'),
                                  InlineKeyboardButton("🔙 Меню", callback_data='back')]]
                     await update.effective_chat.send_message(
@@ -1432,13 +1432,13 @@ class TelegramBot:
                     )
                     return ConversationHandler.END
 
-            # Автоматический анализ через Gemini
+            # Автоматический анализ через OpenAI
             await update.effective_chat.send_message("🤖 Разбираю...")
 
             try:
-                gemini_key = os.getenv('OPENAI_API_KEY')
-                if not gemini_key:
-                    await update.effective_chat.send_message("❌ GEMINI_API_KEY не задан в Railway — анализ недоступен.")
+                openai_key = os.getenv('OPENAI_API_KEY')
+                if not openai_key:
+                    await update.effective_chat.send_message("❌ OPENAI_API_KEY не задан в Railway — анализ недоступен.")
                     return ConversationHandler.END
 
                 # Выбрать промпт в зависимости от типа контента
@@ -1456,7 +1456,7 @@ class TelegramBot:
                     is_carousel=is_carousel_prompt,
                 )
 
-                openai_client = OpenAI(api_key=gemini_key)
+                openai_client = OpenAI(api_key=openai_key)
                 response = _openai_generate_with_retry(
                     openai_client,
                     model='gpt-4o-mini',
@@ -1528,7 +1528,7 @@ class TelegramBot:
         return ConversationHandler.END
 
     async def create_prompt_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Сгенерировать готовый промпт для реализации идеи через Gemini"""
+        """Сгенерировать готовый промпт для реализации идеи через OpenAI"""
         query = update.callback_query
         await query.answer()
 
@@ -1546,9 +1546,9 @@ class TelegramBot:
 
         await query.edit_message_text("⚙️ Генерирую промпт для реализации...")
 
-        gemini_key = os.getenv('OPENAI_API_KEY')
-        if not gemini_key:
-            await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
+        openai_key = os.getenv('OPENAI_API_KEY')
+        if not openai_key:
+            await query.edit_message_text("❌ OPENAI_API_KEY не задан в Railway")
             return
 
         try:
@@ -1561,7 +1561,7 @@ class TelegramBot:
                 analysis=analysis,
             )
 
-            openai_client = OpenAI(api_key=gemini_key)
+            openai_client = OpenAI(api_key=openai_key)
             response = _openai_generate_with_retry(
                 openai_client,
                 model='gpt-4o-mini',
@@ -1693,7 +1693,7 @@ class TelegramBot:
             await msg.edit_text(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
 
     async def analyze_post_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Анализировать пост через Gemini по выбранному действию"""
+        """Анализировать пост через OpenAI по выбранному действию"""
         query = update.callback_query
         await query.answer()
 
@@ -1716,12 +1716,12 @@ class TelegramBot:
         await query.edit_message_text("🤖 Анализирую...")
 
         try:
-            gemini_key = os.getenv('OPENAI_API_KEY')
-            if not gemini_key:
-                await query.edit_message_text("❌ GEMINI_API_KEY не задан в Railway")
+            openai_key = os.getenv('OPENAI_API_KEY')
+            if not openai_key:
+                await query.edit_message_text("❌ OPENAI_API_KEY не задан в Railway")
                 return
 
-            openai_client = OpenAI(api_key=gemini_key)
+            openai_client = OpenAI(api_key=openai_key)
             response = _openai_generate_with_retry(
                 openai_client,
                 model='gpt-4o-mini',
@@ -1904,7 +1904,7 @@ class TelegramBot:
             )
         )
 
-        # Gemini-анализ поста (кнопки на inline-сообщении)
+        # OpenAI-анализ поста (кнопки на inline-сообщении)
         self.application.add_handler(
             CallbackQueryHandler(self.analyze_post_action,
                                  pattern='^analyze_(summary|ideas|adapt)$')

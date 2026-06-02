@@ -165,7 +165,7 @@ Located at path specified by LOG_FILE environment variable (default: logs/bot.lo
 ## Troubleshooting
 
 ### Bot not starting
-1. Check environment variables: `env | grep -E 'TELEGRAM|GEMINI'`
+1. Check environment variables: `env | grep -E 'TELEGRAM|OPENAI|HIKER'`
 2. Verify database initialization: `python3 db_init.py`
 3. Test API keys manually
 
@@ -204,7 +204,8 @@ Add cron job to verify bot is running:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | TELEGRAM_BOT_TOKEN | Yes | - | Telegram Bot API token |
-| GEMINI_API_KEY | Yes | - | OpenAI API key for Gemini, Vision and Whisper |
+| OPENAI_API_KEY | Yes | - | OpenAI API key for GPT-4o text, Vision and Whisper |
+| HIKER_API_KEY | Yes | - | HikerAPI key for Instagram parsing |
 | INSTAGRAM_USERNAME | Yes | - | Instagram account username |
 | INSTAGRAM_PASSWORD | Yes | - | Instagram account password |
 | DATABASE_PATH | No | monitor.db | SQLite database path |
