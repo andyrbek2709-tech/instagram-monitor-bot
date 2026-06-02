@@ -1483,12 +1483,31 @@ class TelegramBot:
                         "Для длинных каруселей в Railway задай переменные "
                         "CAROUSEL_MAX_SLIDES=4 и CAROUSEL_DELAY_SEC=3."
                     )
+                elif '402' in el or 'payment required' in el:
+                    await update.effective_chat.send_message(
+                        "❌ HikerAPI: закончились средства на балансе (402 Payment Required).\n\n"
+                        "Парсинг Instagram работает через HikerAPI и сейчас приостановлен.\n"
+                        "Пополни баланс на https://hikerapi.com → раздел Billing, "
+                        "после этого разбор постов снова заработает."
+                    )
+                elif '401' in el or '403' in el or 'unauthorized' in el or 'forbidden' in el:
+                    await update.effective_chat.send_message(
+                        "❌ HikerAPI: ключ недействителен или нет доступа (401/403).\n"
+                        "Проверь переменную HIKER_API_KEY в настройках хостинга."
+                    )
                 else:
                     await update.effective_chat.send_message(f"❌ Ошибка: {type(e).__name__}: {str(e)[:300]}")
 
         except Exception as e:
             logger.error(f"analyze_url_receive outer error: {e}", exc_info=True)
-            await update.effective_chat.send_message(f"❌ Внутренняя ошибка: {str(e)[:200]}")
+            el = str(e).lower()
+            if '402' in el or 'payment required' in el:
+                await update.effective_chat.send_message(
+                    "❌ HikerAPI: закончились средства на балансе (402 Payment Required).\n\n"
+                    "Пополни баланс на https://hikerapi.com → Billing, и разбор постов заработает снова."
+                )
+            else:
+                await update.effective_chat.send_message(f"❌ Внутренняя ошибка: {str(e)[:200]}")
 
         return ConversationHandler.END
 
