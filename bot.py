@@ -1112,7 +1112,23 @@ class TelegramBot:
                 if not self.parser:
                     await status_msg.edit_text("❌ Парсер Instagram не инициализирован.")
                     return ConversationHandler.END
-                post = await asyncio.to_thread(self.parser.get_post_by_url, url)
+                # Сначала пробуем HikerAPI (полные данные: лайки, комменты, карусели)
+                try:
+                    post = await asyncio.to_thread(self.parser.get_post_by_url, url)
+                except Exception as hiker_err:
+                    el = str(hiker_err).lower()
+                    is_billing = '402' in el or 'payment required' in el
+                    logger.warning(f"HikerAPI failed ({hiker_err}); fallback to yt-dlp")
+                    # Бесплатный fallback через yt-dlp (без лайков/комментов, но текст+видео)
+                    note = ("💸 HikerAPI недоступен (нужно пополнить баланс) — "
+                            "пробую бесплатно через yt-dlp…") if is_billing else \
+                           "⚠️ HikerAPI не ответил — пробую бесплатно через yt-dlp…"
+                    await status_msg.edit_text(note)
+                    try:
+                        post = await asyncio.to_thread(self.media_parser.get_video_info, url)
+                    except Exception as ytdlp_err:
+                        logger.error(f"yt-dlp Instagram fallback failed: {ytdlp_err}", exc_info=True)
+                        post = None
             else:
                 # YouTube или TikTok через MediaParser
                 logger.info(f"Пытаемся распарсить {platform}: {url}")
@@ -1607,7 +1623,23 @@ class TelegramBot:
                 if not self.parser:
                     await msg.edit_text("❌ Парсер Instagram не инициализирован.")
                     return
-                post = await asyncio.to_thread(self.parser.get_post_by_url, url)
+                # HikerAPI с бесплатным fallback на yt-dlp при сбое/402
+                try:
+                    post = await asyncio.to_thread(self.parser.get_post_by_url, url)
+                except Exception as hiker_err:
+                    el = str(hiker_err).lower()
+                    is_billing = '402' in el or 'payment required' in el
+                    logger.warning(f"HikerAPI failed ({hiker_err}); fallback to yt-dlp")
+                    await msg.edit_text(
+                        "💸 HikerAPI недоступен (пополни баланс) — пробую бесплатно через yt-dlp…"
+                        if is_billing else
+                        "⚠️ HikerAPI не ответил — пробую бесплатно через yt-dlp…"
+                    )
+                    try:
+                        post = await asyncio.to_thread(self.media_parser.get_video_info, url)
+                    except Exception as ytdlp_err:
+                        logger.error(f"yt-dlp Instagram fallback failed: {ytdlp_err}", exc_info=True)
+                        post = None
             else:
                 # YouTube или TikTok через MediaParser
                 post = await asyncio.to_thread(self.media_parser.get_video_info, url)
